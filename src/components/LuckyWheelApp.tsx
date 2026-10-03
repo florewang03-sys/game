@@ -28,9 +28,16 @@ import {
   Lock,
   Play,
   Award,
-  ExternalLink
+  ExternalLink,
+  CheckCircle
 } from 'lucide-react';
 import { DEFAULT_MISSIONS, SponsoredMission } from './SecretDashboard';
+import { 
+  requestCampayCollect, 
+  checkCampayTransactionStatus, 
+  detectCameroonOperator,
+  formatCameroonPhone
+} from '../utils/campay';
 
 export interface Sector {
   label: string;
@@ -178,6 +185,14 @@ export function LuckyWheelApp({
   const [smsReference, setSmsReference] = useState('');
   const [rechargeSubmitted, setRechargeSubmitted] = useState(false);
   const [withdrawSubmitted, setWithdrawSubmitted] = useState(false);
+
+  // 🚀 SYSTÈME PAIEMENT AUTOMATIQUE STYLE DGSN (Campay Direct Push)
+  const [payerPhone, setPayerPhone] = useState(() => currentUser ? currentUser.phone : '');
+  const [isProcessingCampay, setIsProcessingCampay] = useState(false);
+  const [campayStep, setCampayStep] = useState<'idle' | 'waiting_pin' | 'verifying' | 'success' | 'failed'>('idle');
+  const [campayStatusMsg, setCampayStatusMsg] = useState('');
+  const [campayRef, setCampayRef] = useState('');
+  const [detectedOperator, setDetectedOperator] = useState<'orange' | 'mtn' | 'unknown'>('orange');
 
   // Déclencheur USSD
   const [isPromptingUSSD, setIsPromptingUSSD] = useState(false);
@@ -589,15 +604,108 @@ export function LuckyWheelApp({
     }
   };
 
-  const handleTriggerPaymentPrompt = () => {
-    setIsPromptingUSSD(true);
-    const encodedUssd = encodeURIComponent(ussdCode);
-    window.location.href = `tel:${encodedUssd}`;
+  // 🚀 SYSTÈME PAIEMENT AUTOMATIQUE STYLE DGSN (Vraie vérification bancaire)
+  const handleStartAutomaticPayment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const phoneToUse = payerPhone.trim() || (currentUser ? currentUser.phone : '');
+    if (!phoneToUse || phoneToUse.length < 9) {
+      alert('Veuillez entrer un numéro de téléphone valide (Orange ou MTN).');
+      return;
+    }
 
-    setTimeout(() => {
-      setIsPromptingUSSD(false);
-      setUssdTriggered(true);
-    }, 1500);
+    const op = detectCameroonOperator(phoneToUse);
+    setDetectedOperator(op);
+    setIsProcessingCampay(true);
+    setCampayStep('waiting_pin');
+    setCampayStatusMsg(`Envoi de la demande de prélèvement de ${rechargePack.price} FCFA sur le ${phoneToUse}...`);
+
+    try {
+      // 1. Envoyer la demande de débit réelle vers Orange / MTN
+      const res = await requestCampayCollect({
+        amount: rechargePack.price,
+        fromPhone: phoneToUse,
+        description: `Roue d'Or 237 - ${rechargePack.spins} tour(s)`,
+        externalReference: `ROUE-${Date.now()}`
+      });
+
+      if (!res.success || !res.reference) {
+        throw new Error(res.error || "Impossible d'initier la transaction");
+      }
+
+      const ref = res.reference;
+      setCampayRef(ref);
+
+      const ussdInfo = res.ussdCode ? ` (Composez ${res.ussdCode} si la popup ne s'ouvre pas)` : '';
+      setCampayStatusMsg(
+        `Une demande de retrait de ${rechargePack.price} FCFA a été envoyée sur votre téléphone${ussdInfo}. Entrez votre code PIN secret pour valider.`
+      );
+
+      // 2. Interroger CamPay toutes les 3 secondes pour savoir quand le joueur tape son code
+      let attempts = 0;
+      const maxAttempts = 25; // 75 secondes max
+
+      const pollInterval = setInterval(async () => {
+        attempts++;
+        try {
+          const statusRes = await checkCampayTransactionStatus(ref);
+
+          if (statusRes.status === 'SUCCESSFUL') {
+            clearInterval(pollInterval);
+            setCampayStep('success');
+            setCampayStatusMsg(`Paiement de ${rechargePack.price} FCFA confirmé par l'opérateur !`);
+            playSound('bonus');
+
+            // Enregistrer dans l'historique des encaissements
+            const pendingRecharges: RechargeRequest[] = JSON.parse(localStorage.getItem('pending_recharges') || '[]');
+            const newReq: RechargeRequest = {
+              id: Date.now().toString(),
+              playerPhone: phoneToUse,
+              amount: rechargePack.price,
+              spins: rechargePack.spins,
+              smsRef: ref,
+              date: new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
+              status: 'approved'
+            };
+            localStorage.setItem('pending_recharges', JSON.stringify([newReq, ...pendingRecharges]));
+
+            // Créditer les tours UNIQUEMENT maintenant
+            if (currentUser) {
+              setCurrentUser(prev => prev ? ({
+                ...prev,
+                spinsLeft: prev.spinsLeft + rechargePack.spins
+              }) : null);
+            } else {
+              setGuestSpinsLeft(prev => prev + rechargePack.spins);
+            }
+
+            setTimeout(() => {
+              setIsProcessingCampay(false);
+              setCampayStep('idle');
+              setShowRechargeModal(false);
+              setRechargeSuccessToast(true);
+              setTimeout(() => setRechargeSuccessToast(false), 3500);
+            }, 2500);
+          } else if (statusRes.status === 'FAILED') {
+            clearInterval(pollInterval);
+            setCampayStep('failed');
+            setCampayStatusMsg('Paiement refusé ou annulé par l\'opérateur.');
+            setIsProcessingCampay(false);
+          } else if (attempts >= maxAttempts) {
+            clearInterval(pollInterval);
+            setCampayStep('failed');
+            setCampayStatusMsg('Délai d\'attente dépassé. Aucun tour n\'a été débité.');
+            setIsProcessingCampay(false);
+          }
+        } catch (e) {
+          console.warn("Vérification statut...", e);
+        }
+      }, 3000);
+    } catch (err: any) {
+      console.error(err);
+      setCampayStep('failed');
+      setCampayStatusMsg(err.message || 'La transaction n\'a pas pu être envoyée à l\'opérateur.');
+      setIsProcessingCampay(false);
+    }
   };
 
   const handleRechargeSubmit = (e: React.FormEvent) => {
@@ -1266,13 +1374,23 @@ export function LuckyWheelApp({
                 <X className="w-5 h-5" />
               </button>
 
-              <div className="flex items-center gap-2 mb-2">
-                <span className="w-6 h-6 rounded-full bg-orange-500 text-slate-950 font-black text-xs flex items-center justify-center">OM</span>
-                <h3 className="text-base font-black text-white">Recharge Orange Money</h3>
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <span className="w-7 h-7 rounded-full bg-gradient-to-r from-orange-500 to-amber-500 text-slate-950 font-black text-xs flex items-center justify-center shadow">
+                    OM
+                  </span>
+                  <div>
+                    <h3 className="text-sm font-black text-white leading-tight">Paiement Mobile Automatique</h3>
+                    <p className="text-[10px] text-emerald-400 font-semibold flex items-center gap-1">
+                      <ShieldCheck className="w-3 h-3" />
+                      Orange Money & MTN Mobile Money (Agréé)
+                    </p>
+                  </div>
+                </div>
               </div>
 
-              <p className="text-[11px] text-slate-400 mb-3">
-                Sélectionnez votre pack de tours (de 300 F jusqu'à 10 000 FCFA) :
+              <p className="text-[11px] text-slate-300 mb-3">
+                Sélectionnez le nombre de tours à débloquer :
               </p>
 
               {/* Sélection du pack */}
@@ -1283,11 +1401,11 @@ export function LuckyWheelApp({
                     type="button"
                     onClick={() => {
                       setRechargePack(pack);
-                      setUssdTriggered(false);
+                      setCampayStep('idle');
                     }}
                     className={`p-2.5 rounded-2xl border text-center transition relative ${
                       rechargePack.price === pack.price
-                        ? 'bg-orange-500/10 border-orange-400 text-white shadow-lg shadow-orange-500/20'
+                        ? 'bg-amber-500/15 border-amber-400 text-white shadow-lg shadow-amber-500/20'
                         : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
                     }`}
                   >
@@ -1296,91 +1414,131 @@ export function LuckyWheelApp({
                         {pack.badge}
                       </span>
                     )}
-                    <span className="block text-base font-black text-orange-400">{pack.spins} Tours</span>
-                    <span className="block text-[11px] font-bold">{pack.price} F</span>
+                    <span className="block text-base font-black text-amber-400">{pack.spins} Tour{pack.spins > 1 ? 's' : ''}</span>
+                    <span className="block text-[11px] font-bold">{pack.price} FCFA</span>
                   </button>
                 ))}
               </div>
 
-              {/* Numéro masqué : affiche exactement les 3 premiers et 2 derniers chiffres */}
-              <div className="bg-slate-950 border border-slate-800 rounded-2xl p-3.5 mb-3 text-xs space-y-2.5">
-                <div className="flex items-center justify-between pb-2 border-b border-slate-800 text-[11px] text-slate-400">
-                  <span>Opérateur officiel :</span>
-                  <span className="font-bold text-orange-400 flex items-center gap-1">
-                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                    Orange Money Cameroun
-                  </span>
-                </div>
-
-                <div className="bg-slate-900 p-2.5 rounded-xl border border-slate-800 flex items-center justify-between">
+              {/* FORMULAIRE OFFICIEL DGSN STYLE DIRECT PUSH */}
+              {campayStep === 'idle' && (
+                <form onSubmit={handleStartAutomaticPayment} className="space-y-3 bg-slate-950 border border-slate-800 rounded-2xl p-4">
                   <div>
-                    <p className="text-[10px] text-slate-400">Compte récepteur officiel :</p>
-                    <p className="text-base font-black text-orange-400 tracking-widest font-mono">
-                      {maskedOrangeNumber}
+                    <label className="block text-[11px] text-slate-300 font-semibold mb-1">
+                      Votre numéro de téléphone (Orange ou MTN) :
+                    </label>
+                    <input
+                      type="tel"
+                      required
+                      placeholder="Ex: 697 00 00 00 ou 670 00 00 00"
+                      value={payerPhone || (currentUser ? currentUser.phone : '')}
+                      onChange={(e) => setPayerPhone(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-white focus:outline-none focus:border-amber-400 font-mono tracking-wider"
+                    />
+                    <p className="text-[10px] text-slate-400 mt-1 flex items-center gap-1">
+                      <Lock className="w-3 h-3 text-emerald-400" />
+                      Retrait sécurisé direct : aucune application téléphone ne s'ouvre.
                     </p>
                   </div>
 
-                  <span className="text-[10px] bg-slate-800 text-slate-300 px-2 py-1 rounded-lg flex items-center gap-1">
-                    <Lock className="w-3 h-3 text-emerald-400" />
-                    Protégé
-                  </span>
-                </div>
+                  <button
+                    type="submit"
+                    className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-500 via-teal-400 to-emerald-400 hover:brightness-110 text-slate-950 font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/25 active:scale-95 transition cursor-pointer"
+                  >
+                    <Smartphone className="w-4 h-4 text-slate-950" />
+                    <span>LANCER LE PAIEMENT AUTOMATIQUE ({rechargePack.price} FCFA)</span>
+                  </button>
 
-                <button
-                  type="button"
-                  onClick={handleTriggerPaymentPrompt}
-                  className="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-orange-500 to-amber-500 hover:brightness-110 text-slate-950 font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-orange-500/20 active:scale-95 transition cursor-pointer"
-                >
-                  <Smartphone className="w-4 h-4 text-slate-950" />
-                  <span>DÉCLENCHER LE PAIEMENT ({rechargePack.price} FCFA)</span>
-                </button>
+                  <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[10px] text-slate-400">
+                    <span>Compte marchand certifié CamPay</span>
+                    <span className="text-amber-400 font-mono">DGSN Instant Push</span>
+                  </div>
+                </form>
+              )}
 
-                {ussdTriggered && (
-                  <div className="p-2.5 rounded-xl bg-orange-500/10 border border-orange-500/30 text-amber-300 text-[11px] space-y-1">
-                    <p className="font-bold flex items-center gap-1 text-orange-400">
-                      📲 Demande envoyée sur votre téléphone !
-                    </p>
-                    <p className="text-slate-300 text-[10px] leading-relaxed">
-                      Entrez votre code secret Orange Money sur votre écran pour valider l'envoi de <strong>{rechargePack.price} FCFA</strong>.
+              {/* ÉTAPE DGSN 1 : EN ATTENTE DU CODE PIN SUR LE TÉLÉPHONE */}
+              {campayStep === 'waiting_pin' && (
+                <div className="bg-slate-950 border border-amber-500/40 rounded-2xl p-4 text-center space-y-3">
+                  <div className="w-12 h-12 mx-auto rounded-full bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
+                    <RefreshCw className="w-6 h-6 animate-spin text-amber-400" />
+                  </div>
+
+                  <div>
+                    <h4 className="text-sm font-black text-white">Retrait en cours sur votre téléphone</h4>
+                    <p className="text-[11px] text-slate-300 mt-1 leading-relaxed">
+                      Une alerte de <strong>{rechargePack.price} FCFA</strong> a été envoyée sur votre téléphone.
                     </p>
                   </div>
-                )}
-              </div>
 
-              {/* Formulaire de confirmation SMS */}
-              <form onSubmit={handleRechargeSubmit} className="space-y-3">
-                <div>
-                  <label className="block text-[11px] text-slate-300 font-semibold mb-1">
-                    Référence SMS reçue d'Orange Money :
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    placeholder=""
-                    value={smsReference}
-                    onChange={(e) => setSmsReference(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-orange-400 font-mono"
-                  />
+                  <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-300 font-semibold">
+                    👉 Veuillez taper votre code secret sur votre téléphone pour valider...
+                  </div>
+
+                  <p className="text-[10px] text-slate-500">
+                    Réf de transaction : <span className="font-mono text-slate-400">{campayRef}</span>
+                  </p>
                 </div>
+              )}
 
-                <button
-                  type="submit"
-                  disabled={rechargeSubmitted}
-                  className="w-full py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 text-slate-950 font-bold text-xs flex items-center justify-center gap-1.5 shadow-lg shadow-emerald-500/20 active:scale-95 transition cursor-pointer"
-                >
-                  {rechargeSubmitted ? (
-                    <span className="flex items-center gap-1.5">
-                      <RefreshCw className="w-4 h-4 animate-spin text-slate-950" />
-                      Activation immédiate de vos tours...
-                    </span>
-                  ) : (
-                    <>
-                      <Play className="w-4 h-4 fill-slate-950" />
-                      Confirmer et continuer ({rechargePack.spins} tours crédités)
-                    </>
-                  )}
-                </button>
-              </form>
+              {/* ÉTAPE DGSN 2 : VALIDATION BANCAIRE */}
+              {campayStep === 'verifying' && (
+                <div className="bg-slate-950 border border-emerald-500/40 rounded-2xl p-4 text-center space-y-3">
+                  <div className="w-12 h-12 mx-auto rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                    <ShieldCheck className="w-6 h-6 animate-pulse text-emerald-400" />
+                  </div>
+
+                  <div>
+                    <h4 className="text-sm font-black text-white">Code PIN reçu !</h4>
+                    <p className="text-[11px] text-slate-300 mt-1">
+                      Validation finale avec l'opérateur en cours...
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* ÉTAPE DGSN 3 : SUCCÈS TOTAL */}
+              {campayStep === 'success' && (
+                <div className="bg-slate-950 border border-emerald-500 rounded-2xl p-4 text-center space-y-3">
+                  <div className="w-12 h-12 mx-auto rounded-full bg-emerald-500/20 border border-emerald-500 flex items-center justify-center text-emerald-400">
+                    <CheckCircle className="w-6 h-6 text-emerald-400" />
+                  </div>
+
+                  <div>
+                    <h4 className="text-sm font-black text-emerald-400">Paiement validé avec succès !</h4>
+                    <p className="text-xs text-white font-bold mt-1">
+                      +{rechargePack.spins} Tour{rechargePack.spins > 1 ? 's' : ''} débloqué{rechargePack.spins > 1 ? 's' : ''} !
+                    </p>
+                  </div>
+
+                  <p className="text-[11px] text-slate-400">
+                    Vous pouvez lancer la roue immédiatement. Bonne chance !
+                  </p>
+                </div>
+              )}
+
+              {/* ÉTAPE DGSN 4 : ERREUR / ANNULATION */}
+              {campayStep === 'failed' && (
+                <div className="bg-slate-950 border border-red-500/40 rounded-2xl p-4 text-center space-y-3">
+                  <div className="w-12 h-12 mx-auto rounded-full bg-red-500/10 border border-red-500/30 flex items-center justify-center text-red-400">
+                    <AlertCircle className="w-6 h-6 text-red-400" />
+                  </div>
+
+                  <div>
+                    <h4 className="text-sm font-black text-red-400">Paiement non finalisé</h4>
+                    <p className="text-[11px] text-slate-400 mt-1">
+                      Le code PIN n'a pas été saisi ou le solde est insuffisant.
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setCampayStep('idle')}
+                    className="px-4 py-2 rounded-xl bg-slate-800 text-white font-bold text-xs hover:bg-slate-700 transition"
+                  >
+                    Réessayer
+                  </button>
+                </div>
+              )}
             </motion.div>
           </div>
         )}
