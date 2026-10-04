@@ -1,5 +1,27 @@
 import JSZip from 'jszip';
 
+export async function downloadModifiedFilesZip(onProgress?: (msg: string) => void) {
+  if (onProgress) onProgress('Téléchargement des fichiers modifiés...');
+  try {
+    const response = await fetch('/fichiers-modifies.zip');
+    if (response.ok) {
+      const blob = await response.blob();
+      const downloadUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = 'fichiers-modifies.zip';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(downloadUrl);
+      if (onProgress) onProgress('Terminé !');
+      return;
+    }
+  } catch (e) {
+    console.warn("Direct file fetch failed", e);
+  }
+}
+
 export async function downloadAppZip(onProgress?: (msg: string) => void) {
   if (onProgress) onProgress('Téléchargement direct du ZIP...');
 

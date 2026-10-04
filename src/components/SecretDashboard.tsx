@@ -28,7 +28,7 @@ import {
   Info
 } from 'lucide-react';
 import { PlayerAccount, RechargeRequest, WithdrawRequest } from './LuckyWheelApp';
-import { downloadAppZip } from '../utils/clientZip';
+import { downloadAppZip, downloadModifiedFilesZip } from '../utils/clientZip';
 import { getCampayCredentials, saveCampayCredentials, CampayCredentials } from '../utils/campay';
 
 export interface SponsoredMission {
@@ -154,6 +154,18 @@ export function SecretDashboard({
       await downloadAppZip((msg) => setDownloadZipMsg(msg));
     } catch (e) {
       alert("Erreur lors de la génération du ZIP.");
+    } finally {
+      setDownloadingZip(false);
+      setDownloadZipMsg('');
+    }
+  };
+
+  const handleModifiedZipDownload = async () => {
+    try {
+      setDownloadingZip(true);
+      await downloadModifiedFilesZip((msg) => setDownloadZipMsg(msg));
+    } catch (e) {
+      alert("Erreur lors du téléchargement du ZIP des fichiers modifiés.");
     } finally {
       setDownloadingZip(false);
       setDownloadZipMsg('');
@@ -344,11 +356,10 @@ export function SecretDashboard({
         <div className="max-w-5xl mx-auto flex gap-2 overflow-x-auto py-2 text-xs font-bold scrollbar-none">
           {[
             { id: 'overview', label: 'Vue Globale' },
-            { id: 'links', label: '🎯 Vos Liens & Clics par Pub' },
-            { id: 'recharges', label: `Dépôts Orange (${recharges.length})` },
+            { id: 'recharges', label: `Dépôts Mobile Money (${recharges.length})` },
             { id: 'withdraws', label: `Retraits (${withdraws.length})` },
-            { id: 'players', label: `Joueurs & Stats (${players.length})` },
-            { id: 'settings', label: '⚙️ Réglages & Fréquence Pubs' },
+            { id: 'players', label: `Joueurs & Caisse (${players.length})` },
+            { id: 'settings', label: '⚙️ Réglages & Clés CamPay' },
           ].map((tab) => (
             <button
               key={tab.id}
@@ -388,13 +399,13 @@ export function SecretDashboard({
                 <p className="text-[10px] text-slate-500 mt-1">{withdraws.length} retraits traités</p>
               </div>
 
-              <div className="bg-slate-900 border border-blue-500/30 rounded-2xl p-4 shadow-lg">
-                <span className="text-xs text-blue-300 font-semibold flex items-center gap-1">
-                  <MousePointerClick className="w-4 h-4 text-blue-400" />
-                  Clics Pubs & Affiliations
+              <div className="bg-slate-900 border border-emerald-500/30 rounded-2xl p-4 shadow-lg">
+                <span className="text-xs text-emerald-300 font-semibold flex items-center gap-1">
+                  <Users className="w-4 h-4 text-emerald-400" />
+                  Joueurs Inscrits
                 </span>
-                <p className="text-2xl font-black text-blue-400 mt-1">{totalMissionClicks}</p>
-                <p className="text-[10px] text-slate-500 mt-1">~{estimatedAffiliateEarnings} FCFA estimés</p>
+                <p className="text-2xl font-black text-emerald-400 mt-1">{players.length}</p>
+                <p className="text-[10px] text-slate-500 mt-1">Comptes actifs sur la plateforme</p>
               </div>
 
               <div className="bg-gradient-to-br from-amber-500/20 to-orange-500/10 border border-amber-500/40 rounded-2xl p-4 shadow-lg">
@@ -407,138 +418,62 @@ export function SecretDashboard({
               </div>
             </div>
 
-            {/* Bouton de téléchargement direct du ZIP pour Vercel */}
-            <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-950/60 to-slate-900 border border-emerald-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs shadow-lg">
-              <div>
-                <h4 className="font-black text-white text-sm flex items-center gap-1.5">
-                  <Download className="w-4 h-4 text-emerald-400" />
-                  Télécharger le Code Complet de l'Application (ZIP pour Vercel)
-                </h4>
-                <p className="text-[11px] text-slate-300 mt-1">
-                  Ce bouton génère et télécharge le fichier <strong>roue-dor-237.zip</strong> directement sur votre appareil sans jamais afficher d'erreur 404.
-                </p>
+            {/* Boutons de téléchargement direct du ZIP pour Vercel */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-950/60 to-slate-900 border border-amber-500/40 flex flex-col justify-between gap-3 shadow-lg">
+                <div>
+                  <h4 className="font-black text-amber-300 text-sm flex items-center gap-1.5">
+                    <Download className="w-4 h-4 text-amber-400" />
+                    Fichiers Modifiés Uniquement (Recommandé)
+                  </h4>
+                  <p className="text-[11px] text-slate-300 mt-1">
+                    Contient <strong>uniquement les 6 fichiers modifiés</strong> (CamPay, blocage pubs, retrait direct sans tours gratuits) à copier dans votre dossier.
+                  </p>
+                </div>
+
+                <button
+                  onClick={handleModifiedZipDownload}
+                  disabled={downloadingZip}
+                  className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-amber-400 to-yellow-400 hover:brightness-110 text-slate-950 font-black text-xs cursor-pointer flex items-center justify-center gap-2 shadow-lg shadow-amber-500/30 active:scale-95 transition"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>{downloadingZip ? (downloadZipMsg || 'Téléchargement...') : 'Télécharger fichiers-modifies.zip'}</span>
+                </button>
               </div>
 
-              <button
-                onClick={handleDirectZipDownload}
-                disabled={downloadingZip}
-                className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 hover:brightness-110 text-slate-950 font-black text-xs cursor-pointer flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/30 active:scale-95 transition shrink-0"
-              >
-                <Download className="w-4 h-4" />
-                <span>{downloadingZip ? (downloadZipMsg || 'Génération du ZIP...') : 'Télécharger roue-dor-237.zip'}</span>
-              </button>
+              <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-950/60 to-slate-900 border border-emerald-500/40 flex flex-col justify-between gap-3 shadow-lg">
+                <div>
+                  <h4 className="font-black text-emerald-300 text-sm flex items-center gap-1.5">
+                    <Download className="w-4 h-4 text-emerald-400" />
+                    Projet Complet Vercel (Tout-en-un)
+                  </h4>
+                  <p className="text-[11px] text-slate-300 mt-1">
+                    Contient l'intégralité du projet prêt à déployer (code source complet, vercel.json, server.ts).
+                  </p>
+                </div>
+
+                <button
+                  onClick={handleDirectZipDownload}
+                  disabled={downloadingZip}
+                  className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 hover:brightness-110 text-slate-950 font-black text-xs cursor-pointer flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/30 active:scale-95 transition"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>{downloadingZip ? (downloadZipMsg || 'Téléchargement...') : 'Télécharger roue-dor-237.zip'}</span>
+                </button>
+              </div>
             </div>
 
             {/* Explications transparentes pour Flore */}
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs space-y-3">
               <h3 className="font-bold text-white flex items-center gap-1.5 text-sm">
                 <HelpCircle className="w-4 h-4 text-amber-400" />
-                Comment votre caisse et vos revenus augmentent en direct :
+                Fonctionnement de votre caisse Mobile Money :
               </h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-slate-300">
-                <div className="bg-slate-950 p-3 rounded-xl border border-slate-800">
-                  <p className="font-black text-amber-400 mb-1">1. L'argent des tours (OM) :</p>
-                  <p className="text-[11px] text-slate-400 leading-relaxed">
-                    Chaque fois qu'un joueur recharge (300 F, 1 500 F ou 10 000 F), les fonds tombent directement sur votre téléphone. L'argent est à vous. Vous ne reversez que les retraits lorsqu'ils atteignent {minWithdrawAmount} FCFA.
-                  </p>
-                </div>
-
-                <div className="bg-slate-950 p-3 rounded-xl border border-slate-800">
-                  <p className="font-black text-blue-400 mb-1">2. L'argent des régies (1XBET, Adsterra) :</p>
-                  <p className="text-[11px] text-slate-400 leading-relaxed">
-                    Chaque fois qu'un joueur clique sur la pub de 5 secondes, le compteur de clics s'incrémente. Les commissions s'accumulent sur vos tableaux de bord officiels (1xpartners, adsterra) et sont payées chaque semaine/quinzaine sur votre Orange Money.
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* 🎯 ONGLET GESTION DES LIENS AVEC STATISTIQUES DE CLIC DÉTAILLÉES PAR PUB */}
-        {activeTab === 'links' && (
-          <div className="space-y-4">
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 text-xs">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-3 border-b border-slate-800">
-                <div>
-                  <h3 className="text-base font-black text-white flex items-center gap-2">
-                    <Award className="w-5 h-5 text-amber-400" />
-                    Vos Liens Publicitaires & Suivi Précis des Clics
-                  </h3>
-                  <p className="text-slate-400 mt-1">
-                    Voyez exactement quelle pub attire le plus de clics et remplacez les adresses par vos vrais liens partenaires.
-                  </p>
-                </div>
-
-                <button
-                  onClick={handleApplyAllMissions}
-                  className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 hover:brightness-110 text-slate-950 font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 active:scale-95 transition cursor-pointer shrink-0"
-                >
-                  <Save className="w-4 h-4" />
-                  <span>APPLIQUER SUR LE SITE</span>
-                </button>
-              </div>
-
-              {linksSavedToast && (
-                <div className="p-3 rounded-xl bg-emerald-500/20 text-emerald-300 font-black border border-emerald-500/40 text-center mb-4 flex items-center justify-center gap-2 text-xs">
-                  <Check className="w-4 h-4" />
-                  <span>Modifications appliquées avec succès ! Tous vos joueurs ouvrent désormais vos liens.</span>
-                </div>
-              )}
-
-              <div className="space-y-3.5">
-                {editableMissions.map((mission) => {
-                  const clicksForThisMission = missionStats[mission.id] || 0;
-                  return (
-                    <div key={mission.id} className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2.5">
-                      <div className="flex items-center justify-between flex-wrap gap-2">
-                        <div className="flex items-center gap-2.5">
-                          <span className="text-2xl">{mission.iconEmoji}</span>
-                          <div>
-                            <h4 className="font-black text-white text-sm">{mission.name}</h4>
-                            <span className="text-[10px] bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded font-bold">
-                              {mission.badge}
-                            </span>
-                          </div>
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs bg-blue-500/20 text-blue-300 px-2.5 py-1 rounded-full font-black border border-blue-500/40 flex items-center gap-1">
-                            <MousePointerClick className="w-3.5 h-3.5" />
-                            {clicksForThisMission} clics enregistrés
-                          </span>
-                          <span className="text-[11px] text-emerald-400 font-bold bg-emerald-950/60 px-2 py-1 rounded-full border border-emerald-500/30">
-                            ~{mission.estimatedEarningsPerClick} F / inscription
-                          </span>
-                        </div>
-                      </div>
-
-                      <p className="text-[11px] text-slate-400">{mission.description}</p>
-
-                      <div>
-                        <label className="block text-[10px] text-slate-300 font-bold mb-1">
-                          Votre lien d'affilié personnel (donné par {mission.id.toUpperCase()}) :
-                        </label>
-                        <input
-                          type="url"
-                          value={mission.url}
-                          onChange={(e) => handleUpdateMissionUrl(mission.id, e.target.value)}
-                          placeholder="https://..."
-                          className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white font-mono focus:border-amber-400"
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              <div className="mt-4 pt-3 border-t border-slate-800 flex justify-end">
-                <button
-                  onClick={handleApplyAllMissions}
-                  className="w-full sm:w-auto px-6 py-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 hover:brightness-110 text-slate-950 font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 active:scale-95 transition cursor-pointer"
-                >
-                  <Save className="w-4 h-4" />
-                  <span>Enregistrer et Activer tous les liens</span>
-                </button>
+              <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 text-slate-300">
+                <p className="font-black text-amber-400 mb-1">Paiements sécurisés des joueurs (CamPay / Orange / MTN) :</p>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  Chaque fois qu'un joueur recharge (300 F, 1 500 F ou 10 000 F), les fonds sont débités directement et versés sur votre compte CamPay / Orange Money. Aucun tour n'est offert gratuitement en dehors du tout premier tour d'essai. Vous ne reversez les gains que lorsque les joueurs atteignent le seuil de retrait fixé à {minWithdrawAmount} FCFA.
+                </p>
               </div>
             </div>
           </div>
@@ -704,10 +639,10 @@ export function SecretDashboard({
           </div>
         )}
 
-        {/* ⚙️ PARAMÈTRES & RÉGLAGE DE LA FRÉQUENCE DES PUBS */}
+        {/* ⚙️ PARAMÈTRES & RÉGLAGES CAMPAY */}
         {activeTab === 'settings' && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 max-w-xl mx-auto space-y-4 text-xs">
-            <h3 className="text-sm font-black text-white mb-1">Paramètres de Réception & Fréquence Publicitaire</h3>
+            <h3 className="text-sm font-black text-white mb-1">Paramètres de Réception & Retraits</h3>
 
             <div>
               <label className="block text-slate-300 font-bold mb-1">
@@ -719,37 +654,6 @@ export function SecretDashboard({
                 onChange={(e) => setOrangeReceiverNumber(e.target.value)}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono focus:border-amber-400"
               />
-            </div>
-
-            {/* Réglage du déclenchement des pubs pour rentabilité maximale */}
-            <div className="p-3.5 rounded-xl bg-slate-950 border border-amber-500/30 space-y-2">
-              <label className="block text-amber-300 font-bold">
-                📺 Déclencher la pub de 5 secondes tous les :
-              </label>
-              <div className="grid grid-cols-3 gap-2">
-                {[
-                  { value: 1, label: 'Chaque tour', desc: 'Rentabilité Max 🔥' },
-                  { value: 2, label: 'Tous les 2 tours', desc: 'Recommandé ⚖️' },
-                  { value: 3, label: 'Tous les 3 tours', desc: 'Doux 🍃' },
-                ].map((opt) => (
-                  <button
-                    key={opt.value}
-                    type="button"
-                    onClick={() => setAdFrequency(opt.value)}
-                    className={`p-2.5 rounded-xl border text-center transition cursor-pointer ${
-                      adFrequency === opt.value
-                        ? 'bg-amber-500/20 border-amber-400 text-white font-bold'
-                        : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
-                    }`}
-                  >
-                    <span className="block text-xs font-black">{opt.label}</span>
-                    <span className="block text-[10px] text-amber-400">{opt.desc}</span>
-                  </button>
-                ))}
-              </div>
-              <p className="text-[10px] text-slate-400 mt-1">
-                Actuellement : une pub de 5 secondes s'affichera <strong>{adFrequency === 1 ? 'après chaque tour tourné' : `tous les ${adFrequency} tours`}</strong>.
-              </p>
             </div>
 
             <div>

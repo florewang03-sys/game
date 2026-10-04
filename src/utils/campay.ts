@@ -96,6 +96,7 @@ export async function requestCampayCollect(params: CollectPaymentParams): Promis
 
   // Tenter l'endpoint Express ou la fonction serverless Vercel
   const endpoints = ['/api/campay/collect', '/api/campay-collect'];
+  let lastErrorMessage = '';
 
   for (const endpoint of endpoints) {
     try {
@@ -117,13 +118,25 @@ export async function requestCampayCollect(params: CollectPaymentParams): Promis
       } else {
         const errData = await res.json().catch(() => ({}));
         console.warn(`Erreur sur ${endpoint}:`, errData);
+        if (errData && typeof errData === 'object') {
+          if (errData.error) {
+            lastErrorMessage = typeof errData.error === 'string' ? errData.error : JSON.stringify(errData.error);
+          } else if (errData.message) {
+            lastErrorMessage = errData.message;
+          }
+        }
       }
-    } catch (e) {
+    } catch (e: any) {
       console.warn(`Fetch échoué sur ${endpoint}:`, e);
+      lastErrorMessage = e.message || 'Erreur réseau';
     }
   }
 
-  throw new Error("Impossible d'initier le paiement avec l'opérateur.");
+  // Si l'API renvoie une erreur détaillée (ex: mauvais identifiants ou compte demo), la transmettre clairement
+  const detailedError = lastErrorMessage 
+    ? `Échec de l'envoi : ${lastErrorMessage}` 
+    : "Impossible d'initier la demande avec l'opérateur. Vérifiez vos clés CamPay ou utilisez le code USSD direct.";
+  throw new Error(detailedError);
 }
 
 /**
