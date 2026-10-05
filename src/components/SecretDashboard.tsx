@@ -25,9 +25,14 @@ import {
   MousePointerClick,
   HelpCircle,
   Download,
-  Info
+  Info,
+  Image as ImageIcon,
+  CheckCircle,
+  XCircle,
+  Eye,
+  Share2
 } from 'lucide-react';
-import { PlayerAccount, RechargeRequest, WithdrawRequest } from './LuckyWheelApp';
+import { PlayerAccount, RechargeRequest, WithdrawRequest, ShareRewardRequest } from './LuckyWheelApp';
 import { downloadAppZip, downloadModifiedFilesZip } from '../utils/clientZip';
 import { getCampayCredentials, saveCampayCredentials, CampayCredentials } from '../utils/campay';
 
@@ -129,11 +134,12 @@ export function SecretDashboard({
 
   const [players, setPlayers] = useState<PlayerAccount[]>([]);
   const [recharges, setRecharges] = useState<RechargeRequest[]>([]);
+  const [shareRewards, setShareRewards] = useState<ShareRewardRequest[]>([]);
   const [withdraws, setWithdraws] = useState<WithdrawRequest[]>([]);
   const [totalAdImpressions, setTotalAdImpressions] = useState(0);
   const [totalMissionClicks, setTotalMissionClicks] = useState(0);
   const [missionStats, setMissionStats] = useState<Record<string, number>>({});
-  const [activeTab, setActiveTab] = useState<'overview' | 'links' | 'recharges' | 'withdraws' | 'players' | 'settings'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'links' | 'recharges' | 'shares' | 'withdraws' | 'players' | 'settings'>('overview');
 
   // Liens d'affiliation éditables par la gérante
   const [editableMissions, setEditableMissions] = useState<SponsoredMission[]>(() => {
@@ -147,6 +153,31 @@ export function SecretDashboard({
   // Clés API CamPay (DGSN Style)
   const [campayCreds, setCampayCreds] = useState<CampayCredentials>(() => getCampayCredentials());
   const [campaySavedToast, setCampaySavedToast] = useState(false);
+
+  // Aperçu de la capture d'écran reçue du joueur
+  const [previewScreenshotUrl, setPreviewScreenshotUrl] = useState<string | null>(null);
+
+  // Détection des nouveaux dépôts et partages pour alerte sonore
+  useEffect(() => {
+    if (isAuthenticated) {
+      const pendingRechargesCount = recharges.filter(r => r.status === 'pending').length;
+      const pendingSharesCount = shareRewards.filter(s => s.status === 'pending').length;
+      if (pendingRechargesCount > 0 || pendingSharesCount > 0) {
+        try {
+          const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.frequency.setValueAtTime(800, audioCtx.currentTime);
+          gain.gain.setValueAtTime(0.08, audioCtx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+          osc.start();
+          osc.stop(audioCtx.currentTime + 0.3);
+        } catch (e) {}
+      }
+    }
+  }, [recharges, shareRewards, isAuthenticated]);
 
   const handleDirectZipDownload = async () => {
     try {
@@ -179,6 +210,9 @@ export function SecretDashboard({
     const rawRecharges: RechargeRequest[] = JSON.parse(localStorage.getItem('pending_recharges') || '[]');
     setRecharges(rawRecharges);
 
+    const rawShares: ShareRewardRequest[] = JSON.parse(localStorage.getItem('pending_share_rewards') || '[]');
+    setShareRewards(rawShares);
+
     const rawWithdraws: WithdrawRequest[] = JSON.parse(localStorage.getItem('pending_withdraws') || '[]');
     setWithdraws(rawWithdraws);
 
@@ -195,6 +229,8 @@ export function SecretDashboard({
   useEffect(() => {
     if (isAuthenticated) {
       loadData();
+      const interval = setInterval(loadData, 2000);
+      return () => clearInterval(interval);
     }
   }, [isAuthenticated]);
 
@@ -213,6 +249,28 @@ export function SecretDashboard({
     const updated = recharges.map(r => r.id === id ? { ...r, status: 'approved' as const } : r);
     setRecharges(updated);
     localStorage.setItem('pending_recharges', JSON.stringify(updated));
+  };
+
+  const handleRejectRecharge = (id: string) => {
+    if (window.confirm("Confirmez-vous le rejet de ce dépôt ? Le joueur n'obtiendra aucun tour.")) {
+      const updated = recharges.map(r => r.id === id ? { ...r, status: 'rejected' as const } : r);
+      setRecharges(updated);
+      localStorage.setItem('pending_recharges', JSON.stringify(updated));
+    }
+  };
+
+  const handleApproveShareReward = (id: string) => {
+    const updated = shareRewards.map(s => s.id === id ? { ...s, status: 'approved' as const } : s);
+    setShareRewards(updated);
+    localStorage.setItem('pending_share_rewards', JSON.stringify(updated));
+  };
+
+  const handleRejectShareReward = (id: string) => {
+    if (window.confirm("Confirmez-vous le rejet de ce partage ? Le joueur n'obtiendra aucun tour gratuit.")) {
+      const updated = shareRewards.map(s => s.id === id ? { ...s, status: 'rejected' as const } : s);
+      setShareRewards(updated);
+      localStorage.setItem('pending_share_rewards', JSON.stringify(updated));
+    }
   };
 
   const handleCompleteWithdraw = (id: string) => {
@@ -356,21 +414,36 @@ export function SecretDashboard({
         <div className="max-w-5xl mx-auto flex gap-2 overflow-x-auto py-2 text-xs font-bold scrollbar-none">
           {[
             { id: 'overview', label: 'Vue Globale' },
-            { id: 'recharges', label: `Dépôts Mobile Money (${recharges.length})` },
-            { id: 'withdraws', label: `Retraits (${withdraws.length})` },
+            { 
+              id: 'recharges', 
+              label: `Dépôts Orange Money (${recharges.filter(r => r.status === 'pending').length > 0 ? `${recharges.filter(r => r.status === 'pending').length} ⏳` : recharges.length})`,
+              hasPending: recharges.some(r => r.status === 'pending')
+            },
+            { 
+              id: 'shares', 
+              label: `Partages 10 Amis (${shareRewards.filter(s => s.status === 'pending').length > 0 ? `${shareRewards.filter(s => s.status === 'pending').length} ⏳` : shareRewards.length})`,
+              hasPending: shareRewards.some(s => s.status === 'pending')
+            },
+            { 
+              id: 'withdraws', 
+              label: `Retraits (${withdraws.filter(w => w.status === 'pending').length > 0 ? `${withdraws.filter(w => w.status === 'pending').length} ⏳` : withdraws.length})`,
+              hasPending: withdraws.some(w => w.status === 'pending')
+            },
             { id: 'players', label: `Joueurs & Caisse (${players.length})` },
-            { id: 'settings', label: '⚙️ Réglages & Clés CamPay' },
+            { id: 'settings', label: '⚙️ Réglages Orange & Limites' },
           ].map((tab) => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id as any)}
-              className={`px-3 py-1.5 rounded-xl whitespace-nowrap transition cursor-pointer ${
+              className={`px-3 py-1.5 rounded-xl whitespace-nowrap transition cursor-pointer flex items-center gap-1.5 ${
                 activeTab === tab.id
-                  ? 'bg-amber-500 text-slate-950 font-black'
+                  ? 'bg-amber-500 text-slate-950 font-black shadow-md shadow-amber-500/20'
+                  : tab.hasPending
+                  ? 'bg-orange-950/80 border border-orange-500/50 text-orange-300 animate-pulse font-bold'
                   : 'bg-slate-800/80 text-slate-400 hover:text-white'
               }`}
             >
-              {tab.label}
+              <span>{tab.label}</span>
             </button>
           ))}
         </div>
@@ -380,17 +453,41 @@ export function SecretDashboard({
         {/* VUE GLOBALE */}
         {activeTab === 'overview' && (
           <div className="space-y-4">
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-lg">
+            <div className="grid grid-cols-1 sm:grid-cols-5 gap-3">
+              <div 
+                onClick={() => setActiveTab('recharges')}
+                className="bg-slate-900 border border-slate-800 hover:border-amber-500/50 cursor-pointer rounded-2xl p-4 shadow-lg transition"
+              >
                 <span className="text-xs text-slate-400 font-semibold flex items-center gap-1">
                   <ArrowDownLeft className="w-4 h-4 text-emerald-400" />
                   Dépôts Joueurs (OM)
                 </span>
                 <p className="text-2xl font-black text-emerald-400 mt-1">{totalEncaissé} FCFA</p>
-                <p className="text-[10px] text-slate-500 mt-1">{recharges.length} recharges reçues</p>
+                <p className="text-[10px] text-slate-500 mt-1">
+                  {recharges.filter(r => r.status === 'pending').length} dépôts à vérifier
+                </p>
               </div>
 
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-lg">
+              <div 
+                onClick={() => setActiveTab('shares')}
+                className="bg-slate-900 border border-emerald-500/30 hover:border-emerald-400 cursor-pointer rounded-2xl p-4 shadow-lg transition"
+              >
+                <span className="text-xs text-emerald-300 font-semibold flex items-center gap-1">
+                  <Share2 className="w-4 h-4 text-emerald-400" />
+                  Partages 10 Amis
+                </span>
+                <p className="text-2xl font-black text-emerald-400 mt-1">
+                  {shareRewards.filter(s => s.status === 'pending').length}
+                </p>
+                <p className="text-[10px] text-emerald-400 font-bold mt-1">
+                  Demandes en attente
+                </p>
+              </div>
+
+              <div 
+                onClick={() => setActiveTab('withdraws')}
+                className="bg-slate-900 border border-slate-800 hover:border-red-500/50 cursor-pointer rounded-2xl p-4 shadow-lg transition"
+              >
                 <span className="text-xs text-slate-400 font-semibold flex items-center gap-1">
                   <ArrowUpRight className="w-4 h-4 text-red-400" />
                   Gains Versés (Retraits)
@@ -399,13 +496,13 @@ export function SecretDashboard({
                 <p className="text-[10px] text-slate-500 mt-1">{withdraws.length} retraits traités</p>
               </div>
 
-              <div className="bg-slate-900 border border-emerald-500/30 rounded-2xl p-4 shadow-lg">
-                <span className="text-xs text-emerald-300 font-semibold flex items-center gap-1">
-                  <Users className="w-4 h-4 text-emerald-400" />
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-lg">
+                <span className="text-xs text-slate-400 font-semibold flex items-center gap-1">
+                  <Users className="w-4 h-4 text-slate-300" />
                   Joueurs Inscrits
                 </span>
-                <p className="text-2xl font-black text-emerald-400 mt-1">{players.length}</p>
-                <p className="text-[10px] text-slate-500 mt-1">Comptes actifs sur la plateforme</p>
+                <p className="text-2xl font-black text-white mt-1">{players.length}</p>
+                <p className="text-[10px] text-slate-500 mt-1">Comptes actifs</p>
               </div>
 
               <div className="bg-gradient-to-br from-amber-500/20 to-orange-500/10 border border-amber-500/40 rounded-2xl p-4 shadow-lg">
@@ -427,7 +524,7 @@ export function SecretDashboard({
                     Fichiers Modifiés Uniquement (Recommandé)
                   </h4>
                   <p className="text-[11px] text-slate-300 mt-1">
-                    Contient <strong>uniquement les 6 fichiers modifiés</strong> (CamPay, blocage pubs, retrait direct sans tours gratuits) à copier dans votre dossier.
+                    Contient <strong>les fichiers modifiés</strong> (Orange Money uniquement, validation des captures, partage 10 amis sur validation) à copier dans votre dossier.
                   </p>
                 </div>
 
@@ -467,55 +564,246 @@ export function SecretDashboard({
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-xs space-y-3">
               <h3 className="font-bold text-white flex items-center gap-1.5 text-sm">
                 <HelpCircle className="w-4 h-4 text-amber-400" />
-                Fonctionnement de votre caisse Mobile Money :
+                Fonctionnement de votre caisse Orange Money :
               </h3>
               <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 text-slate-300">
-                <p className="font-black text-amber-400 mb-1">Paiements sécurisés des joueurs (CamPay / Orange / MTN) :</p>
+                <p className="font-black text-amber-400 mb-1">Recharges uniquement via Orange Money :</p>
                 <p className="text-[11px] text-slate-400 leading-relaxed">
-                  Chaque fois qu'un joueur recharge (300 F, 1 500 F ou 10 000 F), les fonds sont débités directement et versés sur votre compte CamPay / Orange Money. Aucun tour n'est offert gratuitement en dehors du tout premier tour d'essai. Vous ne reversez les gains que lorsque les joueurs atteignent le seuil de retrait fixé à {minWithdrawAmount} FCFA.
+                  Chaque fois qu'un joueur recharge (300 F, 1 500 F ou 10 000 F), les fonds sont transférés vers votre compte Orange Money ({orangeReceiverNumber}). Aucun tour n'est actif gratuitement en dehors du tout premier tour d'essai. Le partage à 10 personnes ne débloque 1 tour que lorsque vous le validez ici. Vous ne reversez les gains que lorsque les joueurs atteignent le seuil de retrait fixé à {minWithdrawAmount} FCFA.
                 </p>
               </div>
             </div>
           </div>
         )}
 
-        {/* DÉPÔTS ORANGE */}
+        {/* DÉPÔTS ORANGE AVEC VÉRIFICATION DES CAPTURES D'ÉCRAN */}
         {activeTab === 'recharges' && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
-            <h3 className="text-sm font-black text-white mb-3">Recharges par Orange Money (Reçues sur 697 •••• 31)</h3>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+              <div>
+                <h3 className="text-sm font-black text-white">Validation des Dépôts Orange Money (Reçus sur 697 •••• 31)</h3>
+                <p className="text-[11px] text-slate-400">
+                  Vérifiez la capture d'écran du joueur avec votre compte Orange Money avant de débloquer ses tours.
+                </p>
+              </div>
+              <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2.5 py-1 rounded-full font-bold self-start sm:self-auto border border-amber-500/30">
+                {recharges.filter(r => r.status === 'pending').length} en attente de vérification
+              </span>
+            </div>
+
             {recharges.length === 0 ? (
               <p className="text-xs text-slate-500 text-center py-6">Aucun dépôt pour le moment.</p>
             ) : (
-              <div className="space-y-2">
+              <div className="space-y-3">
                 {recharges.map((req) => (
                   <div
                     key={req.id}
-                    className="flex flex-col sm:flex-row sm:items-center justify-between p-3 rounded-xl bg-slate-950 border border-slate-800 gap-2 text-xs"
+                    className={`flex flex-col sm:flex-row sm:items-center justify-between p-3.5 rounded-xl border gap-3 text-xs transition ${
+                      req.status === 'pending'
+                        ? 'bg-slate-950 border-amber-500/40 shadow-md shadow-amber-500/5'
+                        : req.status === 'approved'
+                        ? 'bg-slate-950/80 border-emerald-500/30'
+                        : 'bg-slate-950/60 border-red-500/20 opacity-70'
+                    }`}
                   >
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-white font-mono">{req.playerPhone}</span>
-                        <span className="text-emerald-400 font-black">+{req.amount} FCFA</span>
-                        <span className="text-[10px] text-slate-400">({req.spins} tours)</span>
+                    <div className="flex items-start gap-3">
+                      {/* Miniature de la capture d'écran */}
+                      {req.screenshotUrl ? (
+                        <div 
+                          onClick={() => setPreviewScreenshotUrl(req.screenshotUrl)}
+                          className="w-14 h-14 rounded-lg bg-slate-900 border border-amber-500/40 overflow-hidden cursor-pointer hover:border-amber-300 shrink-0 relative group"
+                          title="Cliquer pour agrandir la capture"
+                        >
+                          <img 
+                            src={req.screenshotUrl} 
+                            alt="Reçu" 
+                            className="w-full h-full object-cover group-hover:scale-105 transition"
+                          />
+                          <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition">
+                            <Eye className="w-4 h-4 text-white" />
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="w-14 h-14 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-center shrink-0 text-slate-600">
+                          <ImageIcon className="w-5 h-5" />
+                        </div>
+                      )}
+
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-white font-mono text-sm">{req.playerPhone}</span>
+                          <span className="text-emerald-400 font-black text-sm">+{req.amount} FCFA</span>
+                          <span className="text-[10px] bg-slate-800 text-amber-300 font-bold px-1.5 py-0.5 rounded">
+                            +{req.spins} tour{req.spins > 1 ? 's' : ''}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-400 mt-1">
+                          Déposé le {req.date}
+                        </p>
+                        {req.screenshotUrl && (
+                          <button
+                            type="button"
+                            onClick={() => setPreviewScreenshotUrl(req.screenshotUrl)}
+                            className="mt-1 text-[10px] text-amber-400 hover:underline flex items-center gap-1 font-semibold"
+                          >
+                            <Eye className="w-3 h-3" />
+                            Voir la capture d'écran reçue
+                          </button>
+                        )}
                       </div>
-                      <p className="text-[11px] text-slate-400 mt-0.5">
-                        Réf SMS : <strong className="text-amber-300 font-mono">{req.smsRef}</strong> • {req.date}
-                      </p>
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                        req.status === 'approved' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'
+                    <div className="flex items-center gap-2 self-end sm:self-center">
+                      <span className={`px-2.5 py-1 rounded text-[10px] font-black uppercase ${
+                        req.status === 'approved' 
+                          ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' 
+                          : req.status === 'rejected'
+                          ? 'bg-red-500/20 text-red-400 border border-red-500/30'
+                          : 'bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse'
                       }`}>
-                        {req.status === 'approved' ? 'Validé' : 'En attente'}
+                        {req.status === 'approved' ? '✅ Validé (Tours Débloqués)' : req.status === 'rejected' ? '❌ Rejeté (Fraude)' : '⏳ À Vérifier'}
                       </span>
+
                       {req.status === 'pending' && (
-                        <button
-                          onClick={() => handleApproveRecharge(req.id)}
-                          className="px-2.5 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs cursor-pointer"
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => handleApproveRecharge(req.id)}
+                            className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs cursor-pointer shadow flex items-center gap-1"
+                            title="Valider et débloquer les tours du joueur"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                            <span>Valider</span>
+                          </button>
+                          <button
+                            onClick={() => handleRejectRecharge(req.id)}
+                            className="px-2.5 py-1.5 rounded-lg bg-red-500/20 border border-red-500/40 hover:bg-red-500 hover:text-white text-red-400 font-bold text-xs cursor-pointer transition flex items-center gap-1"
+                            title="Rejeter ce faux dépôt"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                            <span>Refuser</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* DEMANDES DE PARTAGE (10 AMIS = 1 TOUR SUR VALIDATION) */}
+        {activeTab === 'shares' && (
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+              <div>
+                <h3 className="text-sm font-black text-white flex items-center gap-2">
+                  <Share2 className="w-4 h-4 text-emerald-400" />
+                  Validation des Partages (10 Amis = 1 Tour Gratuit)
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  Vérifiez la preuve et cliquez sur Valider pour débloquer 1 tour sur la roue du joueur.
+                </p>
+              </div>
+              <span className="text-[10px] bg-emerald-500/20 text-emerald-300 px-2.5 py-1 rounded-full font-bold self-start sm:self-auto border border-emerald-500/30">
+                {shareRewards.filter(s => s.status === 'pending').length} en attente de validation
+              </span>
+            </div>
+
+            {shareRewards.length === 0 ? (
+              <p className="text-xs text-slate-500 text-center py-6">Aucune demande de partage pour le moment.</p>
+            ) : (
+              <div className="space-y-3">
+                {shareRewards.map((req) => (
+                  <div
+                    key={req.id}
+                    className={`flex flex-col sm:flex-row sm:items-center justify-between p-3.5 rounded-xl border gap-3 text-xs transition ${
+                      req.status === 'pending'
+                        ? 'bg-slate-950 border-emerald-500/40 shadow-md shadow-emerald-500/5'
+                        : req.status === 'approved'
+                        ? 'bg-slate-950/80 border-emerald-500/30'
+                        : 'bg-slate-950/60 border-red-500/20 opacity-70'
+                    }`}
+                  >
+                    <div className="flex items-start gap-3">
+                      {/* Capture d'écran WhatsApp si fournie */}
+                      {req.screenshotUrl ? (
+                        <div 
+                          onClick={() => setPreviewScreenshotUrl(req.screenshotUrl || null)}
+                          className="w-14 h-14 rounded-lg bg-slate-900 border border-emerald-500/40 overflow-hidden cursor-pointer hover:border-emerald-300 shrink-0 relative group"
+                          title="Cliquer pour agrandir la capture de partage"
                         >
-                          Confirmer Réception
-                        </button>
+                          <img 
+                            src={req.screenshotUrl} 
+                            alt="Preuve partage" 
+                            className="w-full h-full object-cover group-hover:scale-105 transition"
+                          />
+                          <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition">
+                            <Eye className="w-4 h-4 text-white" />
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="w-14 h-14 rounded-lg bg-slate-900 border border-slate-800 flex items-center justify-center shrink-0 text-emerald-400">
+                          <Share2 className="w-6 h-6" />
+                        </div>
+                      )}
+
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-white font-mono text-sm">{req.playerPhone}</span>
+                          <span className="text-[10px] bg-emerald-500/20 text-emerald-300 font-bold px-2 py-0.5 rounded border border-emerald-500/30">
+                            10 partages effectués
+                          </span>
+                          <span className="text-[10px] bg-amber-500/20 text-amber-300 font-bold px-1.5 py-0.5 rounded">
+                            +1 Tour offert
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-400 mt-1">
+                          Demande émise à {req.date}
+                        </p>
+                        {req.screenshotUrl && (
+                          <button
+                            type="button"
+                            onClick={() => setPreviewScreenshotUrl(req.screenshotUrl || null)}
+                            className="mt-1 text-[10px] text-emerald-400 hover:underline flex items-center gap-1 font-semibold"
+                          >
+                            <Eye className="w-3 h-3" />
+                            Voir la capture d'écran du partage
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 self-end sm:self-center">
+                      <span className={`px-2.5 py-1 rounded text-[10px] font-black uppercase ${
+                        req.status === 'approved' 
+                          ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' 
+                          : req.status === 'rejected'
+                          ? 'bg-red-500/20 text-red-400 border border-red-500/30'
+                          : 'bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse'
+                      }`}>
+                        {req.status === 'approved' ? '✅ Validé (+1 Tour Débloqué)' : req.status === 'rejected' ? '❌ Rejeté' : '⏳ À Valider'}
+                      </span>
+
+                      {req.status === 'pending' && (
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => handleApproveShareReward(req.id)}
+                            className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs cursor-pointer shadow flex items-center gap-1"
+                            title="Valider et donner 1 tour gratuit au joueur"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                            <span>Valider</span>
+                          </button>
+                          <button
+                            onClick={() => handleRejectShareReward(req.id)}
+                            className="px-2.5 py-1.5 rounded-lg bg-red-500/20 border border-red-500/40 hover:bg-red-500 hover:text-white text-red-400 font-bold text-xs cursor-pointer transition flex items-center gap-1"
+                            title="Refuser ce partage"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                            <span>Refuser</span>
+                          </button>
+                        </div>
                       )}
                     </div>
                   </div>
@@ -698,7 +986,7 @@ export function SecretDashboard({
               </div>
 
               <p className="text-[11px] text-slate-400">
-                Vos clés d'accès API fournies par CamPay pour envoyer la demande de retrait direct aux clients (Orange Money & MTN) :
+                Vos clés d'accès API fournies par CamPay pour envoyer la demande de retrait direct aux clients (Orange Money uniquement) :
               </p>
 
               <div>
@@ -780,6 +1068,43 @@ export function SecretDashboard({
           </div>
         )}
       </main>
+
+      {/* POPUP AGRANDISSEMENT DE LA CAPTURE D'ÉCRAN REÇUE DU JOUEUR */}
+      {previewScreenshotUrl && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/90 backdrop-blur-md">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 max-w-lg w-full max-h-[90vh] flex flex-col shadow-2xl relative">
+            <button
+              onClick={() => setPreviewScreenshotUrl(null)}
+              className="absolute top-4 right-4 text-slate-400 hover:text-white p-1.5 rounded-full bg-slate-800"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-2 mb-3">
+              <ImageIcon className="w-5 h-5 text-amber-400" />
+              <h3 className="text-sm font-black text-white">Capture d'Écran du Paiement Joueur</h3>
+            </div>
+
+            <div className="flex-1 overflow-auto rounded-xl bg-slate-950 border border-slate-800 p-2 flex items-center justify-center">
+              <img 
+                src={previewScreenshotUrl} 
+                alt="Capture d'écran Orange Money" 
+                className="max-h-[65vh] w-auto rounded-lg object-contain shadow-md"
+              />
+            </div>
+
+            <div className="pt-3 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setPreviewScreenshotUrl(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs"
+              >
+                Fermer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,5 +1,4 @@
-import type { VercelRequest, VercelResponse } from '@vercel/node';
-
+// Serverless API pour le statut CamPay
 let cachedToken: string | null = null;
 let tokenExpiresAt = 0;
 
@@ -30,7 +29,7 @@ async function getCampayAuthToken(username: string, password: string, environmen
   return cachedToken;
 }
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req: any, res: any) {
   try {
     const reference = (req.query.reference as string) || '';
     const env = (req.query.environment as string) || 'demo';
