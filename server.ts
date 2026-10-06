@@ -1,10 +1,17 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
+import syncHandler from './api/sync';
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '15mb' }));
+app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 
 const PORT = 3000;
+
+// Route de synchronisation centrale en temps réel
+app.all('/api/sync', (req, res) => {
+  syncHandler(req, res);
+});
 
 // Cache du token Campay en mémoire
 let cachedToken: string | null = null;

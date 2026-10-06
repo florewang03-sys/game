@@ -35,6 +35,7 @@ import {
 import { PlayerAccount, RechargeRequest, WithdrawRequest, ShareRewardRequest } from './LuckyWheelApp';
 import { downloadAppZip, downloadModifiedFilesZip } from '../utils/clientZip';
 import { getCampayCredentials, saveCampayCredentials, CampayCredentials } from '../utils/campay';
+import { fetchRemoteSync, sendRemoteAction } from '../utils/syncService';
 
 export interface SponsoredMission {
   id: string;
@@ -203,18 +204,26 @@ export function SecretDashboard({
     }
   };
 
-  const loadData = () => {
-    const rawPlayers: Record<string, PlayerAccount> = JSON.parse(localStorage.getItem('all_players') || '{}');
-    setPlayers(Object.values(rawPlayers));
+  const loadData = async () => {
+    const remoteData = await fetchRemoteSync();
+    if (remoteData) {
+      setPlayers(Object.values(remoteData.players || {}));
+      setRecharges(remoteData.recharges || []);
+      setShareRewards(remoteData.shareRewards || []);
+      setWithdraws(remoteData.withdraws || []);
+    } else {
+      const rawPlayers: Record<string, PlayerAccount> = JSON.parse(localStorage.getItem('all_players') || '{}');
+      setPlayers(Object.values(rawPlayers));
 
-    const rawRecharges: RechargeRequest[] = JSON.parse(localStorage.getItem('pending_recharges') || '[]');
-    setRecharges(rawRecharges);
+      const rawRecharges: RechargeRequest[] = JSON.parse(localStorage.getItem('pending_recharges') || '[]');
+      setRecharges(rawRecharges);
 
-    const rawShares: ShareRewardRequest[] = JSON.parse(localStorage.getItem('pending_share_rewards') || '[]');
-    setShareRewards(rawShares);
+      const rawShares: ShareRewardRequest[] = JSON.parse(localStorage.getItem('pending_share_rewards') || '[]');
+      setShareRewards(rawShares);
 
-    const rawWithdraws: WithdrawRequest[] = JSON.parse(localStorage.getItem('pending_withdraws') || '[]');
-    setWithdraws(rawWithdraws);
+      const rawWithdraws: WithdrawRequest[] = JSON.parse(localStorage.getItem('pending_withdraws') || '[]');
+      setWithdraws(rawWithdraws);
+    }
 
     const impressions = parseInt(localStorage.getItem('total_ad_impressions') || '0', 10);
     setTotalAdImpressions(impressions);
@@ -245,38 +254,52 @@ export function SecretDashboard({
     }
   };
 
-  const handleApproveRecharge = (id: string) => {
+  const handleApproveRecharge = async (id: string) => {
+    const target = recharges.find(r => r.id === id);
     const updated = recharges.map(r => r.id === id ? { ...r, status: 'approved' as const } : r);
     setRecharges(updated);
     localStorage.setItem('pending_recharges', JSON.stringify(updated));
+
+    // Débloque et active les tours directement sur le compte du joueur
+    await sendRemoteAction('approve_recharge', { id, spins: target?.spins, playerPhone: target?.playerPhone });
+    await loadData();
   };
 
-  const handleRejectRecharge = (id: string) => {
+  const handleRejectRecharge = async (id: string) => {
     if (window.confirm("Confirmez-vous le rejet de ce dépôt ? Le joueur n'obtiendra aucun tour.")) {
       const updated = recharges.map(r => r.id === id ? { ...r, status: 'rejected' as const } : r);
       setRecharges(updated);
       localStorage.setItem('pending_recharges', JSON.stringify(updated));
+      await sendRemoteAction('reject_recharge', { id });
+      await loadData();
     }
   };
 
-  const handleApproveShareReward = (id: string) => {
+  const handleApproveShareReward = async (id: string) => {
+    const target = shareRewards.find(s => s.id === id);
     const updated = shareRewards.map(s => s.id === id ? { ...s, status: 'approved' as const } : s);
     setShareRewards(updated);
     localStorage.setItem('pending_share_rewards', JSON.stringify(updated));
+    await sendRemoteAction('approve_share', { id, spinsReward: 1, playerPhone: target?.playerPhone });
+    await loadData();
   };
 
-  const handleRejectShareReward = (id: string) => {
+  const handleRejectShareReward = async (id: string) => {
     if (window.confirm("Confirmez-vous le rejet de ce partage ? Le joueur n'obtiendra aucun tour gratuit.")) {
       const updated = shareRewards.map(s => s.id === id ? { ...s, status: 'rejected' as const } : s);
       setShareRewards(updated);
       localStorage.setItem('pending_share_rewards', JSON.stringify(updated));
+      await sendRemoteAction('reject_share', { id });
+      await loadData();
     }
   };
 
-  const handleCompleteWithdraw = (id: string) => {
+  const handleCompleteWithdraw = async (id: string) => {
     const updated = withdraws.map(w => w.id === id ? { ...w, status: 'completed' as const } : w);
     setWithdraws(updated);
     localStorage.setItem('pending_withdraws', JSON.stringify(updated));
+    await sendRemoteAction('complete_withdraw', { id });
+    await loadData();
   };
 
   const handleUpdateMissionUrl = (id: string, newUrl: string) => {
@@ -382,13 +405,13 @@ export function SecretDashboard({
 
           <div className="flex items-center gap-2">
             <button
-              onClick={handleDirectZipDownload}
+              onClick={handleModifiedZipDownload}
               disabled={downloadingZip}
-              className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 hover:brightness-110 text-slate-950 font-black text-xs cursor-pointer flex items-center gap-1.5 shadow-md shadow-emerald-500/20 active:scale-95 transition"
-              title="Télécharger l'application complète pour Vercel"
+              className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-amber-400 to-yellow-400 hover:brightness-110 text-slate-950 font-black text-xs cursor-pointer flex items-center gap-1.5 shadow-md shadow-amber-500/20 active:scale-95 transition"
+              title="Télécharger les fichiers modifiés uniquement"
             >
               <Download className="w-3.5 h-3.5" />
-              <span>{downloadingZip ? (downloadZipMsg || 'Téléchargement...') : 'Télécharger ZIP Vercel'}</span>
+              <span>{downloadingZip ? (downloadZipMsg || 'Téléchargement...') : 'Télécharger Fichiers Modifiés (ZIP)'}</span>
             </button>
 
             <button
@@ -515,47 +538,49 @@ export function SecretDashboard({
               </div>
             </div>
 
-            {/* Boutons de téléchargement direct du ZIP pour Vercel */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-              <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-950/60 to-slate-900 border border-amber-500/40 flex flex-col justify-between gap-3 shadow-lg">
+            {/* Boutons de téléchargement ZIP (Projet complet ou Fichiers modifiés) */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* 1. PROJET COMPLET (Pour Git et Vercel) */}
+              <div className="p-5 rounded-2xl bg-gradient-to-r from-emerald-950/70 via-slate-900 to-emerald-950/40 border-2 border-emerald-500/50 flex flex-col justify-between gap-4 shadow-xl">
                 <div>
-                  <h4 className="font-black text-amber-300 text-sm flex items-center gap-1.5">
-                    <Download className="w-4 h-4 text-amber-400" />
-                    Fichiers Modifiés Uniquement (Recommandé)
+                  <h4 className="font-black text-emerald-300 text-sm flex items-center gap-2">
+                    <Download className="w-5 h-5 text-emerald-400" />
+                    Projet Complet pour Git & Vercel (ZIP)
                   </h4>
-                  <p className="text-[11px] text-slate-300 mt-1">
-                    Contient <strong>les fichiers modifiés</strong> (Orange Money uniquement, validation des captures, partage 10 amis sur validation) à copier dans votre dossier.
-                  </p>
-                </div>
-
-                <button
-                  onClick={handleModifiedZipDownload}
-                  disabled={downloadingZip}
-                  className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-amber-400 to-yellow-400 hover:brightness-110 text-slate-950 font-black text-xs cursor-pointer flex items-center justify-center gap-2 shadow-lg shadow-amber-500/30 active:scale-95 transition"
-                >
-                  <Download className="w-4 h-4" />
-                  <span>{downloadingZip ? (downloadZipMsg || 'Téléchargement...') : 'Télécharger fichiers-modifies.zip'}</span>
-                </button>
-              </div>
-
-              <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-950/60 to-slate-900 border border-emerald-500/40 flex flex-col justify-between gap-3 shadow-lg">
-                <div>
-                  <h4 className="font-black text-emerald-300 text-sm flex items-center gap-1.5">
-                    <Download className="w-4 h-4 text-emerald-400" />
-                    Projet Complet Vercel (Tout-en-un)
-                  </h4>
-                  <p className="text-[11px] text-slate-300 mt-1">
-                    Contient l'intégralité du projet prêt à déployer (code source complet, vercel.json, server.ts).
+                  <p className="text-xs text-slate-300 mt-1.5 leading-relaxed">
+                    Contient <strong>100% du projet complet</strong> (Front-end, Backend /api, configuration Vercel, scripts, styles). Prêt à télécharger, extraire et pousser directement sur votre GitHub !
                   </p>
                 </div>
 
                 <button
                   onClick={handleDirectZipDownload}
                   disabled={downloadingZip}
-                  className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 hover:brightness-110 text-slate-950 font-black text-xs cursor-pointer flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/30 active:scale-95 transition"
+                  className="w-full py-3 rounded-xl bg-gradient-to-r from-emerald-400 to-teal-400 hover:brightness-110 text-slate-950 font-black text-xs cursor-pointer flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/30 active:scale-95 transition"
                 >
                   <Download className="w-4 h-4" />
-                  <span>{downloadingZip ? (downloadZipMsg || 'Téléchargement...') : 'Télécharger roue-dor-237.zip'}</span>
+                  <span>{downloadingZip ? (downloadZipMsg || 'Téléchargement...') : 'Télécharger Projet Complet (.ZIP)'}</span>
+                </button>
+              </div>
+
+              {/* 2. FICHIERS MODIFIÉS UNIQUEMENT */}
+              <div className="p-5 rounded-2xl bg-gradient-to-r from-amber-950/70 via-slate-900 to-amber-950/40 border-2 border-amber-500/50 flex flex-col justify-between gap-4 shadow-xl">
+                <div>
+                  <h4 className="font-black text-amber-300 text-sm flex items-center gap-2">
+                    <Download className="w-5 h-5 text-amber-400" />
+                    Fichiers Modifiés Uniquement (ZIP)
+                  </h4>
+                  <p className="text-xs text-slate-300 mt-1.5 leading-relaxed">
+                    Contient <strong>uniquement les fichiers mis à jour</strong> (Orange Money, validation des dépôts et partages 10 amis, principe du jeu, boutons sous la roue).
+                  </p>
+                </div>
+
+                <button
+                  onClick={handleModifiedZipDownload}
+                  disabled={downloadingZip}
+                  className="w-full py-3 rounded-xl bg-gradient-to-r from-amber-400 to-yellow-400 hover:brightness-110 text-slate-950 font-black text-xs cursor-pointer flex items-center justify-center gap-2 shadow-lg shadow-amber-500/30 active:scale-95 transition"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>{downloadingZip ? (downloadZipMsg || 'Téléchargement...') : 'Télécharger Fichiers Modifiés (.ZIP)'}</span>
                 </button>
               </div>
             </div>

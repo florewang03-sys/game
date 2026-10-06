@@ -35,8 +35,11 @@ import {
   Phone,
   Hourglass,
   Eye,
-  Users
+  Users,
+  Settings,
+  HelpCircle
 } from 'lucide-react';
+import { fetchRemoteSync, sendRemoteAction } from '../utils/syncService';
 
 export interface Sector {
   label: string;
@@ -159,6 +162,7 @@ export function LuckyWheelApp({
   const [showRechargeModal, setShowRechargeModal] = useState(false);
   const [showWithdrawModal, setShowWithdrawModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
+  const [showRulesModal, setShowRulesModal] = useState(false);
 
   // Formulaires
   const [authPhone, setAuthPhone] = useState('');
@@ -196,25 +200,43 @@ export function LuckyWheelApp({
   // Déclencheur secret 3-clics
   const [logoClickCount, setLogoClickCount] = useState(0);
 
-  // 🔄 ÉCOUTE EN TEMPS RÉEL DE LA VALIDATION PAR FLORE (RECHARGES & PARTAGES)
+  // 🔄 ÉCOUTE EN TEMPS RÉEL DE LA VALIDATION PAR FLORE (RECHARGES & PARTAGES - MULTI-APPAREILS)
   useEffect(() => {
-    const checkApproval = () => {
-      const userPhone = currentUser ? currentUser.phone : (sharePlayerPhone || depositPhone || localStorage.getItem('last_share_phone') || '');
+    const checkApproval = async () => {
+      const userPhone = currentUser ? currentUser.phone : (depositPhone.trim() || sharePlayerPhone.trim() || localStorage.getItem('last_share_phone') || '');
 
-      // 1. Vérification des dépôts Orange Money
-      const allRecharges: RechargeRequest[] = JSON.parse(localStorage.getItem('pending_recharges') || '[]');
+      // Synchronisation distante avec le serveur
+      const remoteData = await fetchRemoteSync();
+
+      // 1. Si joueur connecté, synchroniser immédiatement avec le compte serveur
+      if (currentUser && remoteData?.players?.[currentUser.phone]) {
+        const serverPlayer = remoteData.players[currentUser.phone];
+        if (serverPlayer.spinsLeft > currentUser.spinsLeft) {
+          const addedSpins = serverPlayer.spinsLeft - currentUser.spinsLeft;
+          playSound('bonus');
+          setRechargeSuccessToast(true);
+          setIsDepositPendingApproval(false);
+          setPendingRechargeId(null);
+          setDepositSubmitted(false);
+          setShowRechargeModal(false);
+          setCurrentUser(serverPlayer);
+          setTimeout(() => setRechargeSuccessToast(false), 4500);
+          return;
+        }
+      }
+
+      // 2. Vérification des dépôts Orange Money (pour invité ou joueur connecté)
+      const creditedIds: string[] = JSON.parse(localStorage.getItem('credited_recharge_ids') || '[]');
+      const allRecharges: RechargeRequest[] = remoteData?.recharges || JSON.parse(localStorage.getItem('pending_recharges') || '[]');
+      
       if (userPhone) {
         const myPending = allRecharges.find(r => r.playerPhone === userPhone && r.status === 'pending');
-        const myJustApproved = allRecharges.find(r => 
-          r.playerPhone === userPhone && 
-          r.status === 'approved' && 
-          pendingRechargeId === r.id
-        );
+        const myApproved = allRecharges.find(r => r.playerPhone === userPhone && r.status === 'approved' && !creditedIds.includes(r.id));
 
         if (myPending) {
           setIsDepositPendingApproval(true);
           setPendingRechargeId(myPending.id);
-        } else if (myJustApproved) {
+        } else if (myApproved) {
           // Flore vient de valider sur son tableau de bord !
           setIsDepositPendingApproval(false);
           setPendingRechargeId(null);
@@ -223,32 +245,36 @@ export function LuckyWheelApp({
           playSound('bonus');
           setRechargeSuccessToast(true);
 
-          // Débloquer les tours
+          const spinsToAdd = Number(myApproved.spins) || 1;
           if (currentUser) {
             setCurrentUser(prev => prev ? ({
               ...prev,
-              spinsLeft: prev.spinsLeft + myJustApproved.spins
+              spinsLeft: prev.spinsLeft + spinsToAdd
             }) : null);
           } else {
-            setGuestSpinsLeft(prev => prev + myJustApproved.spins);
+            setGuestSpinsLeft(prev => prev + spinsToAdd);
           }
 
+          creditedIds.push(myApproved.id);
+          localStorage.setItem('credited_recharge_ids', JSON.stringify(creditedIds));
           setTimeout(() => setRechargeSuccessToast(false), 4500);
-        } else {
+        } else if (!myPending) {
           setIsDepositPendingApproval(false);
         }
       }
 
-      // 2. Vérification des récompenses de Partage (10 personnes = 1 tour après validation)
-      const allShareReqs: ShareRewardRequest[] = JSON.parse(localStorage.getItem('pending_share_rewards') || '[]');
+      // 3. Vérification des récompenses de Partage (10 personnes = 1 tour après validation)
+      const creditedShareIds: string[] = JSON.parse(localStorage.getItem('credited_share_ids') || '[]');
+      const allShareReqs: ShareRewardRequest[] = remoteData?.shareRewards || JSON.parse(localStorage.getItem('pending_share_rewards') || '[]');
+      
       if (userPhone) {
         const myPendingShare = allShareReqs.find(s => s.playerPhone === userPhone && s.status === 'pending');
-        const myApprovedShare = allShareReqs.find(s => s.playerPhone === userPhone && s.status === 'approved');
+        const myApprovedShare = allShareReqs.find(s => s.playerPhone === userPhone && s.status === 'approved' && !creditedShareIds.includes(s.id));
         const myRejectedShare = allShareReqs.find(s => s.playerPhone === userPhone && s.status === 'rejected');
 
         if (myPendingShare) {
           setSharePendingApproval(true);
-        } else if (myApprovedShare && sharePendingApproval) {
+        } else if (myApprovedShare) {
           // Flore a validé le partage à 10 personnes !
           setSharePendingApproval(false);
           setShareProofSubmitted(false);
@@ -256,36 +282,32 @@ export function LuckyWheelApp({
           playSound('bonus');
           setShareSuccessToast(true);
 
-          // Créditer le 1 tour gratuit
+          const spinsToAdd = Number(myApprovedShare.spinsReward) || 1;
           if (currentUser) {
             setCurrentUser(prev => prev ? ({
               ...prev,
-              spinsLeft: prev.spinsLeft + (myApprovedShare.spinsReward || 1),
-              sharesCount: 0 // Réinitialiser le compteur de partages pour le cycle suivant
+              spinsLeft: prev.spinsLeft + spinsToAdd,
+              sharesCount: 0
             }) : null);
           } else {
-            setGuestSpinsLeft(prev => prev + (myApprovedShare.spinsReward || 1));
+            setGuestSpinsLeft(prev => prev + spinsToAdd);
             setGuestSharesCount(0);
             localStorage.setItem('guest_shares_count', '0');
           }
 
-          // Marquer comme réclamé pour ne pas créditer en boucle
-          const updatedShares = allShareReqs.filter(s => s.id !== myApprovedShare.id);
-          localStorage.setItem('pending_share_rewards', JSON.stringify(updatedShares));
-
+          creditedShareIds.push(myApprovedShare.id);
+          localStorage.setItem('credited_share_ids', JSON.stringify(creditedShareIds));
           setTimeout(() => setShareSuccessToast(false), 4500);
         } else if (myRejectedShare && sharePendingApproval) {
           setSharePendingApproval(false);
           setShareProofSubmitted(false);
           setShareRejectToast(true);
-          const updatedShares = allShareReqs.filter(s => s.id !== myRejectedShare.id);
-          localStorage.setItem('pending_share_rewards', JSON.stringify(updatedShares));
           setTimeout(() => setShareRejectToast(false), 5000);
         }
       }
     };
 
-    const interval = setInterval(checkApproval, 1500);
+    const interval = setInterval(checkApproval, 2000);
     return () => clearInterval(interval);
   }, [currentUser, depositPhone, sharePlayerPhone, pendingRechargeId, sharePendingApproval]);
 
@@ -503,6 +525,9 @@ export function LuckyWheelApp({
     setShowAuthModal(false);
     setAuthError('');
     setShowRechargeModal(true);
+
+    // Envoi au serveur pour que Flore voie le joueur en direct sur l'admin
+    sendRemoteAction('save_player', player);
   };
 
   const handleLogout = () => {
@@ -558,6 +583,9 @@ export function LuckyWheelApp({
 
     localStorage.setItem('pending_recharges', JSON.stringify([newReq, ...pendingRecharges]));
     setIsDepositPendingApproval(true);
+
+    // Transmission réseau instantanée vers le tableau de bord de Flore
+    sendRemoteAction('submit_recharge', newReq);
   };
 
   const handleWithdrawSubmit = (e: React.FormEvent) => {
@@ -576,6 +604,7 @@ export function LuckyWheelApp({
       status: 'pending'
     };
     localStorage.setItem('pending_withdraws', JSON.stringify([newReq, ...pendingWithdraws]));
+    sendRemoteAction('submit_withdraw', newReq);
 
     setTimeout(() => {
       setCurrentUser(prev => prev ? ({
@@ -689,11 +718,12 @@ export function LuckyWheelApp({
 
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setShowShareModal(true)}
-              className="px-2.5 py-1.5 rounded-lg bg-emerald-600/20 border border-emerald-500/40 text-xs font-bold text-emerald-400 hover:bg-emerald-600/30 flex items-center gap-1.5 transition"
+              onClick={() => setShowRulesModal(true)}
+              className="px-2.5 py-1.5 rounded-lg bg-slate-800/90 hover:bg-slate-800 border border-slate-700 text-amber-400 text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+              title="Paramètres : Principe du jeu"
             >
-              <Share2 className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Partager (10 amis = 1 Tour)</span>
+              <Settings className="w-3.5 h-3.5" />
+              <span>Paramètres</span>
             </button>
 
             <button
@@ -770,7 +800,7 @@ export function LuckyWheelApp({
             </button>
           </div>
 
-          {/* Tours Disponibles */}
+          {/* Tours Disponibles (Sans les boutons qui sont uniquement sous la roue) */}
           <div className="bg-slate-950 border border-orange-500/30 rounded-2xl p-3.5 relative overflow-hidden shadow-lg flex flex-col justify-between">
             <div>
               <div className="flex items-center justify-between text-xs text-orange-300 font-semibold mb-1">
@@ -784,38 +814,25 @@ export function LuckyWheelApp({
               </div>
               <div className="flex items-baseline gap-1.5">
                 <span className="text-2xl sm:text-3xl font-black text-orange-400">{currentSpins}</span>
-                <span className="text-xs font-bold text-slate-400">{currentSpins > 1 ? 'tours prêts' : 'tour prêt'}</span>
+                <span className="text-xs font-bold text-slate-400">
+                  {currentSpins > 1 ? 'tours débloqués' : currentSpins === 1 ? 'tour débloqué' : 'aucun tour débloqué'}
+                </span>
               </div>
               <p className="text-[10px] text-slate-400 mt-1">
                 {!currentUser && guestSpinsLeft > 0 
                   ? '🎁 1er tour 100% gratuit ! Tournez tout de suite.' 
-                  : currentUser 
-                    ? `Joué : ${currentUser.totalSpinsPlayed} / ${maxSpinsPerDay} tours max/jour`
-                    : 'Rechargez dès 300 F pour continuer'}
+                  : currentSpins > 0
+                    ? `🎯 ${currentSpins} tour${currentSpins > 1 ? 's' : ''} débloqué${currentSpins > 1 ? 's' : ''} prêt${currentSpins > 1 ? 's' : ''} à tourner !`
+                    : 'Rechargez ou partagez sous la roue pour débloquer des tours.'}
               </p>
             </div>
 
-            <button
-              onClick={() => {
-                if (!currentUser) {
-                  setShowAuthModal(true);
-                } else {
-                  setShowRechargeModal(true);
-                }
-              }}
-              className="w-full mt-2.5 py-1.5 px-3 rounded-xl font-bold text-xs bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-400 hover:to-amber-400 text-slate-950 flex items-center justify-center gap-1.5 shadow-md shadow-orange-500/20 transition transform active:scale-95"
-            >
-              <Gift className="w-3.5 h-3.5" />
-              Recharger (Dès 300 F)
-            </button>
-
-            <button
-              onClick={() => setShowShareModal(true)}
-              className="w-full mt-1.5 py-1 px-2 rounded-xl font-bold text-[10px] bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-400 flex items-center justify-center gap-1 transition active:scale-95"
-            >
-              <Share2 className="w-3 h-3" />
-              <span>Partager à 10 amis = 1 tour</span>
-            </button>
+            <div className="mt-2 pt-2 border-t border-slate-800/80 text-[10px] text-slate-400 flex items-center justify-between">
+              <span>Statut :</span>
+              <span className={currentSpins > 0 ? "text-emerald-400 font-black" : "text-amber-400 font-semibold"}>
+                {currentSpins > 0 ? `${currentSpins} tour${currentSpins > 1 ? 's' : ''} débloqué${currentSpins > 1 ? 's' : ''}` : '0 tour prêt'}
+              </span>
+            </div>
           </div>
         </div>
       </section>
@@ -917,7 +934,7 @@ export function LuckyWheelApp({
                 {isSpinning ? '...' : 'TOURNER'}
               </span>
               <span className="text-[9px] font-bold text-slate-800">
-                {currentSpins > 0 ? `${currentSpins} prêt` : '300 F'}
+                {currentSpins > 0 ? `${currentSpins} débloqué${currentSpins > 1 ? 's' : ''}` : '300 F'}
               </span>
             </div>
           </button>
@@ -930,7 +947,7 @@ export function LuckyWheelApp({
             disabled={isSpinning}
             className={`w-full py-3 px-6 rounded-2xl font-black text-sm sm:text-base flex items-center justify-center gap-2 shadow-xl transition transform active:scale-95 ${
               currentSpins > 0
-                ? 'bg-gradient-to-r from-amber-400 via-yellow-400 to-orange-500 text-slate-950 hover:brightness-110 shadow-amber-500/25'
+                ? 'bg-gradient-to-r from-amber-400 via-yellow-400 to-orange-500 text-slate-950 hover:brightness-110 shadow-amber-500/25 ring-2 ring-amber-400/40'
                 : 'bg-gradient-to-r from-orange-500 to-amber-500 text-slate-950 hover:brightness-110 shadow-orange-500/25'
             }`}
           >
@@ -942,12 +959,12 @@ export function LuckyWheelApp({
             ) : currentSpins > 0 ? (
               <>
                 <Trophy className="w-5 h-5 text-slate-950" />
-                LANCER LE TOUR ({currentSpins} disponible)
+                <span>LANCER LE TOUR ({currentSpins} TOUR{currentSpins > 1 ? 'S' : ''} DÉBLOQUÉ{currentSpins > 1 ? 'S' : ''})</span>
               </>
             ) : (
               <>
                 <Gift className="w-5 h-5" />
-                RECHARGER 1 TOUR (300 FCFA)
+                <span>RECHARGER 1 TOUR (DÈS 300 FCFA)</span>
               </>
             )}
           </button>
@@ -973,7 +990,7 @@ export function LuckyWheelApp({
             className="w-full py-2 px-3 rounded-xl bg-slate-900 border border-emerald-500/40 text-emerald-400 text-xs font-bold flex items-center justify-center gap-2 hover:bg-emerald-950/40 transition active:scale-95"
           >
             <Share2 className="w-4 h-4 text-emerald-400" />
-            <span>Partager à 10 amis = 1 tour (Validation de Flore)</span>
+            <span>Partager à 10 amis = 1 tour gratuit</span>
           </button>
         </div>
       </main>
@@ -1109,7 +1126,7 @@ export function LuckyWheelApp({
                       Étape 1 : Effectuez le paiement Orange Money
                     </span>
                     <p className="text-[11px] text-slate-300">
-                      Montant exact : <strong className="text-white">{rechargePack.price} FCFA</strong> vers le compte gérante ({maskedOrangeNumber})
+                      Montant exact : <strong className="text-white">{rechargePack.price} FCFA</strong> vers le compte Orange Money ({maskedOrangeNumber})
                     </p>
 
                     <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between gap-2">
@@ -1214,10 +1231,10 @@ export function LuckyWheelApp({
                   <div>
                     <h4 className="text-sm font-black text-white">Vérification de votre dépôt en cours</h4>
                     <p className="text-xs text-slate-300 mt-1 leading-relaxed">
-                      Votre capture d'écran a été transmise à la gérante.
+                      Votre capture d'écran a été transmise pour vérification.
                     </p>
                     <p className="text-[11px] text-amber-300 font-bold mt-1">
-                      Dès qu'elle vérifie votre virement sur son compte, vos tours se débloquent automatiquement !
+                      Dès vérification de votre virement Orange Money, vos tours se débloquent automatiquement !
                     </p>
                   </div>
 
@@ -1232,12 +1249,12 @@ export function LuckyWheelApp({
                       <span>JOUER LE TOUR (BLOQUÉ JUSQU'À VALIDATION)</span>
                     </button>
                     <span className="text-[10px] text-slate-400 block">
-                      ⏳ Cette page se débloque toute seule en direct dès que la gérante confirme.
+                      ⏳ Cette page se débloque toute seule en direct dès confirmation de votre dépôt.
                     </span>
                   </div>
 
                   <div className="pt-2 border-t border-slate-800 flex justify-between items-center text-[10px] text-slate-400">
-                    <span>Statut : En attente gérante</span>
+                    <span>Statut : En cours de vérification...</span>
                     <button
                       type="button"
                       onClick={() => setIsDepositPendingApproval(false)}
@@ -1501,13 +1518,14 @@ export function LuckyWheelApp({
 
                       localStorage.setItem('pending_share_rewards', JSON.stringify([newReq, ...allShareReqs]));
                       setSharePendingApproval(true);
+                      sendRemoteAction('submit_share', newReq);
                     }}
                     className="pt-2 border-t border-slate-800 space-y-2.5"
                   >
                     {!currentUser && (
                       <div>
                         <label className="block text-[11px] text-slate-300 font-semibold mb-1">
-                          Votre numéro Orange Money (pour que Flore valide votre tour) :
+                          Votre numéro Orange Money (pour recevoir le tour débloqué) :
                         </label>
                         <input
                           type="tel"
@@ -1565,7 +1583,7 @@ export function LuckyWheelApp({
                   </form>
                 </div>
               ) : (
-                /* En attente de validation de l'administratrice */
+                /* En attente de validation */
                 <div className="bg-slate-950 border border-amber-500/40 rounded-2xl p-5 text-center space-y-3.5 mt-3">
                   <div className="w-12 h-12 mx-auto rounded-full bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 animate-pulse">
                     <Hourglass className="w-6 h-6 text-amber-400 animate-spin" />
@@ -1574,18 +1592,109 @@ export function LuckyWheelApp({
                   <div>
                     <h4 className="text-sm font-black text-white">Demande de tour gratuit transmise</h4>
                     <p className="text-xs text-slate-300 mt-1 leading-relaxed">
-                      Vos 10 partages sont en cours de vérification par l'administratrice Flore.
+                      Vos 10 partages sont en cours de vérification sécurisée.
                     </p>
                     <p className="text-[11px] text-amber-300 font-bold mt-1">
-                      Votre tour gratuit s'activera dès qu'elle confirme votre demande !
+                      Votre tour gratuit s'activera dès confirmation de votre demande !
                     </p>
                   </div>
 
                   <div className="p-2.5 bg-slate-900 border border-slate-800 rounded-xl text-[11px] text-slate-400">
-                    <span>Statut : En attente de validation gérante...</span>
+                    <span>Statut : En cours de validation...</span>
                   </div>
                 </div>
               )}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* 📖 MODALE PARAMÈTRES & PRINCIPE DU JEU */}
+      <AnimatePresence>
+        {showRulesModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-sm">
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-slate-900 border border-slate-800 rounded-3xl p-5 max-w-md w-full shadow-2xl relative max-h-[90vh] overflow-y-auto"
+            >
+              <button
+                onClick={() => setShowRulesModal(false)}
+                className="absolute top-4 right-4 text-slate-400 hover:text-white p-1 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
+              <div className="flex items-center gap-2.5 mb-3">
+                <div className="w-9 h-9 rounded-2xl bg-amber-500/20 text-amber-400 flex items-center justify-center font-bold">
+                  <Settings className="w-5 h-5 text-amber-400" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-white">Paramètres : Principe du Jeu</h3>
+                  <p className="text-[11px] text-slate-400">Règles et fonctionnement de La Roue d'Or 237</p>
+                </div>
+              </div>
+
+              <div className="space-y-3 text-xs text-slate-300">
+                <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 space-y-1">
+                  <div className="flex items-center gap-2 font-bold text-amber-400">
+                    <span>🎁 1. Premier Tour Offert</span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Dès votre première visite, vous bénéficiez d'un <strong>1er tour gratuit</strong> sans inscription pour tester votre chance immédiatement.
+                  </p>
+                </div>
+
+                <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 space-y-1">
+                  <div className="flex items-center gap-2 font-bold text-emerald-400">
+                    <span>👑 2. Gains en Argent Réel & Tirelire</span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    La roue permet de gagner jusqu'à <strong>10 000 FCFA cash</strong> à chaque tour. Tous vos gains sont conservés dans votre Tirelire personnelle.
+                  </p>
+                </div>
+
+                <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 space-y-1">
+                  <div className="flex items-center gap-2 font-bold text-orange-400">
+                    <span>⚡ 3. Retraits Directs par Orange Money</span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Dès que votre tirelire atteint le montant minimum de <strong>{minWithdrawAmount} FCFA</strong>, vous pouvez effectuer une demande de retrait. Le montant vous est directement transféré sur votre compte Orange Money.
+                  </p>
+                </div>
+
+                <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 space-y-1.5">
+                  <div className="flex items-center gap-2 font-bold text-amber-300">
+                    <span>🎯 4. Comment Débloquer des Tours</span>
+                  </div>
+                  <ul className="text-[11px] text-slate-400 space-y-1 list-disc list-inside">
+                    <li>
+                      <strong className="text-white">Recharge Orange Money :</strong> Choisissez un pack de tours (dès 300 FCFA), effectuez le virement par code USSD et téléversez votre reçu. Dès confirmation, vos tours sont débloqués.
+                    </li>
+                    <li>
+                      <strong className="text-white">Partage WhatsApp :</strong> Partagez votre lien de jeu à 10 amis ou groupes. Une fois vérifié, 1 tour gratuit vous est accordé.
+                    </li>
+                  </ul>
+                </div>
+
+                <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 space-y-1">
+                  <div className="flex items-center gap-2 font-bold text-slate-300">
+                    <span>🔒 5. Équité et Sécurité</span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Toutes les transactions sont sécurisées, sans publicité intrusive, garantissant une expérience de jeu fluide et transparente.
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowRulesModal(false)}
+                className="w-full mt-4 py-2.5 rounded-xl bg-gradient-to-r from-amber-400 to-orange-500 text-slate-950 font-black text-xs cursor-pointer shadow-lg shadow-amber-500/20 active:scale-95 transition"
+              >
+                J'ai compris, je joue !
+              </button>
             </motion.div>
           </div>
         )}

@@ -1,11 +1,11 @@
 {
-  "name": "react-example",
+  "name": "laroo-237",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "node node_modules/vite/bin/vite.js build",
+    "build": "vite build",
     "start": "node server.ts",
     "preview": "vite preview",
     "lint": "tsc --noEmit"
