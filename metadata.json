@@ -1,0 +1,6 @@
+{
+  "name": "La Roue d'Or 237 | Jeu Mobile Cameroun",
+  "description": "Plateforme de jeu de roue de la fortune avec tirage immédiat et gains retirables par Orange Money Cameroun.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
