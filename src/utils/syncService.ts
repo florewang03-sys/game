@@ -7,9 +7,20 @@ export interface SyncData {
   withdraws: WithdrawRequest[];
 }
 
-export async function fetchRemoteSync(): Promise<SyncData | null> {
+// Code administrateur : renseigné uniquement par le tableau de bord de Flore après connexion.
+let adminPin = '';
+export function setAdminPin(pin: string) {
+  adminPin = pin;
+}
+function adminHeaders(): Record<string, string> {
+  return adminPin ? { 'x-admin-pin': adminPin } : {};
+}
+
+// Joueur : on ne reçoit QUE ses propres données (on passe son numéro). Flore (code admin) reçoit tout.
+export async function fetchRemoteSync(phone?: string): Promise<SyncData | null> {
   try {
-    const res = await fetch('/api/sync');
+    const url = phone ? `/api/sync?phone=${encodeURIComponent(phone)}` : '/api/sync';
+    const res = await fetch(url, { headers: adminHeaders() });
     if (res.ok) {
       const data: SyncData = await res.json();
       if (data && typeof data === 'object') {
@@ -27,15 +38,30 @@ export async function fetchRemoteSync(): Promise<SyncData | null> {
   return null;
 }
 
+// Capture d'écran d'un paiement (réservée à Flore) : kind 'r' = dépôt, 's' = partage
+export async function fetchScreenshot(kind: 'r' | 's', id: string): Promise<string | null> {
+  try {
+    const res = await fetch(`/api/sync?shot=${encodeURIComponent(kind + ':' + id)}`, { headers: adminHeaders() });
+    if (res.ok) {
+      const data = await res.json();
+      return typeof data?.screenshotUrl === 'string' ? data.screenshotUrl : null;
+    }
+  } catch (err) {
+    // ignoré
+  }
+  return null;
+}
+
 export async function sendRemoteAction(action: string, payload: any): Promise<{ success: boolean; data?: any }> {
   try {
     const res = await fetch('/api/sync', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...adminHeaders() },
       body: JSON.stringify({ action, payload })
     });
+    let data: any = null;
+    try { data = await res.json(); } catch (e) { /* réponse vide */ }
     if (res.ok) {
-      const data = await res.json();
       if (data) {
         if (data.recharges) localStorage.setItem('pending_recharges', JSON.stringify(data.recharges));
         if (data.shareRewards) localStorage.setItem('pending_share_rewards', JSON.stringify(data.shareRewards));
@@ -44,6 +70,8 @@ export async function sendRemoteAction(action: string, payload: any): Promise<{ 
       }
       return { success: true, data };
     }
+    // Refus du serveur (code admin, capture trop lourde, etc.) : on garde le message pour l'afficher
+    return { success: false, data };
   } catch (err) {
     console.warn("Échec d'envoi réseau sync:", err);
   }

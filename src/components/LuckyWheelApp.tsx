@@ -50,16 +50,49 @@ export interface Sector {
   isJackpot?: boolean;
 }
 
+// ⚠️ Les lots et leurs probabilités sont tirés par le SERVEUR (voir WHEEL dans api/sync.ts).
+// Ici, seul l'ORDRE et l'aspect des cases comptent : le jeu retrouve la case à partir du montant gagné.
 export const SECTORS: Sector[] = [
-  { label: '50 FCFA', value: 50, color: '#f59e0b', textColor: '#ffffff', probability: 34 },
+  { label: '50 FCFA', value: 50, color: '#f59e0b', textColor: '#ffffff', probability: 34.7 },
   { label: '0 FCFA', value: 0, color: '#475569', textColor: '#ffffff', probability: 27 },
   { label: '100 FCFA', value: 100, color: '#10b981', textColor: '#ffffff', probability: 18 },
   { label: '250 FCFA', value: 250, color: '#3b82f6', textColor: '#ffffff', probability: 10 },
   { label: '500 FCFA', value: 500, color: '#8b5cf6', textColor: '#ffffff', probability: 5 },
   { label: '1 000 FCFA', value: 1000, color: '#ec4899', textColor: '#ffffff', probability: 3.5 },
   { label: '5 000 FCFA 🌟', value: 5000, color: '#ea580c', textColor: '#ffffff', probability: 1.7 },
-  { label: '10 000 F 👑', value: 10000, color: '#dc2626', textColor: '#ffffff', probability: 0.8, isJackpot: true },
+  { label: '10 000 F 👑', value: 10000, color: '#dc2626', textColor: '#ffffff', probability: 0.1, isJackpot: true },
 ];
+
+// Réduit une capture d'écran (~150 Ko) avant l'envoi : plus rapide et compatible avec les limites de la base de données.
+function compressImage(dataUrl: string, maxSide = 1280): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return resolve(dataUrl);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        let quality = 0.7;
+        let out = canvas.toDataURL('image/jpeg', quality);
+        while (out.length > 600000 && quality > 0.3) {
+          quality -= 0.1;
+          out = canvas.toDataURL('image/jpeg', quality);
+        }
+        resolve(out);
+      } catch (e) {
+        resolve(dataUrl);
+      }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
 
 export interface PlayerAccount {
   phone: string;
@@ -77,7 +110,9 @@ export interface RechargeRequest {
   playerPhone: string;
   amount: number;
   spins: number;
-  screenshotUrl: string; // Capture d'écran du paiement OM
+  screenshotUrl?: string; // Capture d'écran du paiement OM (conservée à part, visible seulement par Flore)
+  hasScreenshot?: boolean;
+  payerPhone?: string; // Numéro Orange Money utilisé pour payer, s'il diffère du compte joueur
   date: string;
   status: 'pending' | 'approved' | 'rejected';
 }
@@ -88,6 +123,7 @@ export interface ShareRewardRequest {
   sharesCount: number;
   spinsReward: number;
   screenshotUrl?: string; // Capture facultative ou preuve
+  hasScreenshot?: boolean;
   date: string;
   status: 'pending' | 'approved' | 'rejected';
 }
@@ -152,6 +188,8 @@ export function LuckyWheelApp({
   // Liens sponsorisés supprimés - Système sans aucune pub
   // États de la roue
   const [isSpinning, setIsSpinning] = useState(false);
+  const initialCheckRef = useRef(false);
+  const isSpinningRef = useRef(false); // vrai pendant qu'un tour est en cours (évite les resynchronisations parasites)
   const [rotationAngle, setRotationAngle] = useState(0);
   const [lastWin, setLastWin] = useState<number | null>(null);
   const [showWinModal, setShowWinModal] = useState(false);
@@ -201,64 +239,56 @@ export function LuckyWheelApp({
   const [logoClickCount, setLogoClickCount] = useState(0);
 
   // 🔄 ÉCOUTE EN TEMPS RÉEL DE LA VALIDATION PAR FLORE (RECHARGES & PARTAGES - MULTI-APPAREILS)
+  // ⚠️ RÈGLE D'OR : le SERVEUR est l'unique source de vérité pour les tours.
+  //   • Il crédite UNE SEULE FOIS quand Flore valide un dépôt (avec le nombre de tours qu'elle a choisi).
+  //   • Il décompte chaque tour joué ET tire le lot (action spin).
+  // Le téléphone du joueur ne fait que LIRE ce compteur : il n'ajoute plus jamais de tours lui-même.
   useEffect(() => {
     const checkApproval = async () => {
-      const userPhone = currentUser ? currentUser.phone : (depositPhone.trim() || sharePlayerPhone.trim() || localStorage.getItem('last_share_phone') || '');
+      if (document.hidden) return; // onglet en arrière-plan : on économise les requêtes
 
-      // Synchronisation distante avec le serveur
-      const remoteData = await fetchRemoteSync();
+      const userPhone = currentUser ? currentUser.phone : (depositPhone.trim().replace(/\s+/g, '') || sharePlayerPhone.trim().replace(/\s+/g, '') || localStorage.getItem('last_share_phone') || '');
 
-      // 1. Si joueur connecté, synchroniser immédiatement avec le compte serveur
-      if (currentUser && remoteData?.players?.[currentUser.phone]) {
-        const serverPlayer = remoteData.players[currentUser.phone];
-        if (serverPlayer.spinsLeft > currentUser.spinsLeft) {
-          const addedSpins = serverPlayer.spinsLeft - currentUser.spinsLeft;
-          playSound('bonus');
-          setRechargeSuccessToast(true);
-          setIsDepositPendingApproval(false);
-          setPendingRechargeId(null);
-          setDepositSubmitted(false);
-          setShowRechargeModal(false);
-          setCurrentUser(serverPlayer);
-          setTimeout(() => setRechargeSuccessToast(false), 4500);
-          return;
+      // Synchronisation avec le serveur : on ne reçoit QUE les données de ce joueur
+      const remoteData = await fetchRemoteSync(userPhone || undefined);
+      if (!remoteData) return; // serveur injoignable : on ne change rien à l'écran
+
+      // 1. Joueur connecté : on recopie UNIQUEMENT le compteur de tours du compte serveur
+      //    (jamais pendant qu'un tour est en cours, pour ne pas fausser le décompte)
+      if (currentUser && remoteData?.players?.[currentUser.phone] && !isSpinningRef.current) {
+        const serverSpins = Math.max(0, Number(remoteData.players[currentUser.phone].spinsLeft) || 0);
+        if (serverSpins !== currentUser.spinsLeft) {
+          setCurrentUser(prev => (prev && prev.phone === currentUser.phone) ? ({ ...prev, spinsLeft: serverSpins }) : prev);
         }
       }
 
-      // 2. Vérification des dépôts Orange Money (pour invité ou joueur connecté)
+      // 2. Suivi des dépôts Orange Money : AFFICHAGE SEULEMENT (le crédit des tours est fait par le serveur)
       const creditedIds: string[] = JSON.parse(localStorage.getItem('credited_recharge_ids') || '[]');
       const allRecharges: RechargeRequest[] = remoteData?.recharges || JSON.parse(localStorage.getItem('pending_recharges') || '[]');
-      
+
       if (userPhone) {
         const myPending = allRecharges.find(r => r.playerPhone === userPhone && r.status === 'pending');
-        const myApproved = allRecharges.find(r => r.playerPhone === userPhone && r.status === 'approved' && !creditedIds.includes(r.id));
+        const myNewApproved = allRecharges.filter(r => r.playerPhone === userPhone && r.status === 'approved' && !creditedIds.includes(r.id));
 
         if (myPending) {
           setIsDepositPendingApproval(true);
           setPendingRechargeId(myPending.id);
-        } else if (myApproved) {
-          // Flore vient de valider sur son tableau de bord !
+        } else if (myNewApproved.length > 0 && currentUser) {
+          // Flore vient de valider : les tours sont déjà sur le compte serveur (recopiés à l'étape 1)
+          const justValidated = myNewApproved.some(r => r.id === pendingRechargeId);
+          myNewApproved.forEach(r => creditedIds.push(r.id));
+          localStorage.setItem('credited_recharge_ids', JSON.stringify(creditedIds));
+
           setIsDepositPendingApproval(false);
           setPendingRechargeId(null);
           setDepositSubmitted(false);
-          setShowRechargeModal(false);
-          playSound('bonus');
-          setRechargeSuccessToast(true);
-
-          const spinsToAdd = Number(myApproved.spins) || 1;
-          if (currentUser) {
-            setCurrentUser(prev => prev ? ({
-              ...prev,
-              spinsLeft: prev.spinsLeft + spinsToAdd
-            }) : null);
-          } else {
-            setGuestSpinsLeft(prev => prev + spinsToAdd);
+          if (justValidated) {
+            setShowRechargeModal(false);
+            playSound('bonus');
+            setRechargeSuccessToast(true);
+            setTimeout(() => setRechargeSuccessToast(false), 4500);
           }
-
-          creditedIds.push(myApproved.id);
-          localStorage.setItem('credited_recharge_ids', JSON.stringify(creditedIds));
-          setTimeout(() => setRechargeSuccessToast(false), 4500);
-        } else if (!myPending) {
+        } else {
           setIsDepositPendingApproval(false);
         }
       }
@@ -275,29 +305,34 @@ export function LuckyWheelApp({
         if (myPendingShare) {
           setSharePendingApproval(true);
         } else if (myApprovedShare) {
-          // Flore a validé le partage à 10 personnes !
-          setSharePendingApproval(false);
-          setShareProofSubmitted(false);
-          setShowShareModal(false);
-          playSound('bonus');
-          setShareSuccessToast(true);
-
-          const spinsToAdd = Number(myApprovedShare.spinsReward) || 1;
-          if (currentUser) {
-            setCurrentUser(prev => prev ? ({
-              ...prev,
-              spinsLeft: prev.spinsLeft + spinsToAdd,
-              sharesCount: 0
-            }) : null);
-          } else {
-            setGuestSpinsLeft(prev => prev + spinsToAdd);
-            setGuestSharesCount(0);
-            localStorage.setItem('guest_shares_count', '0');
-          }
-
           creditedShareIds.push(myApprovedShare.id);
           localStorage.setItem('credited_share_ids', JSON.stringify(creditedShareIds));
-          setTimeout(() => setShareSuccessToast(false), 4500);
+
+          if (currentUser) {
+            // Connecté : le serveur a déjà crédité le tour (recopié à l'étape 1). On ne fait que l'affichage.
+            if (sharePendingApproval) {
+              setSharePendingApproval(false);
+              setShareProofSubmitted(false);
+              setShowShareModal(false);
+              playSound('bonus');
+              setShareSuccessToast(true);
+              setCurrentUser(prev => prev ? ({ ...prev, sharesCount: 0 }) : null);
+              setTimeout(() => setShareSuccessToast(false), 4500);
+            }
+          } else {
+            // Visiteur non connecté : le tour est déjà sur le compte SERVEUR de ce numéro (rien n'est crédité ici).
+            // Il le retrouve en se connectant avec le même numéro.
+            setSharePendingApproval(false);
+            setShareProofSubmitted(false);
+            setShowShareModal(false);
+            playSound('bonus');
+            setShareSuccessToast(true);
+            setGuestSharesCount(0);
+            localStorage.setItem('guest_shares_count', '0');
+            setAuthPhone(userPhone);
+            setShowAuthModal(true);
+            setTimeout(() => setShareSuccessToast(false), 4500);
+          }
         } else if (myRejectedShare && sharePendingApproval) {
           setSharePendingApproval(false);
           setShareProofSubmitted(false);
@@ -307,9 +342,15 @@ export function LuckyWheelApp({
       }
     };
 
-    const interval = setInterval(checkApproval, 2000);
+    // Toutes les 4 s quand le joueur attend une validation, sinon toutes les 15 s (économise la base de données)
+    const waitingForFlore = isDepositPendingApproval || sharePendingApproval;
+    if (!initialCheckRef.current) {
+      initialCheckRef.current = true;
+      checkApproval(); // première vérification dès l'ouverture du jeu
+    }
+    const interval = setInterval(checkApproval, waitingForFlore ? 4000 : 15000);
     return () => clearInterval(interval);
-  }, [currentUser, depositPhone, sharePlayerPhone, pendingRechargeId, sharePendingApproval]);
+  }, [currentUser, depositPhone, sharePlayerPhone, pendingRechargeId, sharePendingApproval, isDepositPendingApproval]);
 
   useEffect(() => {
     if (!currentUser) {
@@ -421,8 +462,8 @@ export function LuckyWheelApp({
     return { index: 0, sector: SECTORS[0] };
   };
 
-  const handleSpin = () => {
-    if (isSpinning) return;
+  const handleSpin = async () => {
+    if (isSpinning || isSpinningRef.current) return;
 
     if (!currentUser && guestSpinsLeft <= 0) {
       setShowAuthModal(true);
@@ -434,41 +475,57 @@ export function LuckyWheelApp({
       return;
     }
 
-    if (currentUser && currentUser.totalSpinsPlayed >= maxSpinsPerDay) {
-      alert(`Plafond journalier atteint (${maxSpinsPerDay} tours/jour). Revenez demain pour retenter votre chance !`);
-      return;
-    }
-
+    // Verrou immédiat (évite le double clic pendant l'aller-retour avec le serveur)
+    isSpinningRef.current = true;
     setIsSpinning(true);
 
+    let chosen: { index: number; sector: Sector };
+    let serverBalance: number | null = null;
+
     if (currentUser) {
+      // 🎡 Le SERVEUR décompte le tour ET tire le lot. Le téléphone ne décide de rien :
+      // il reçoit le montant gagné et se contente d'animer la roue jusqu'à la bonne case.
+      const result = await sendRemoteAction('spin', { phone: currentUser.phone, maxPerDay: maxSpinsPerDay });
+      const body = result.data;
+      const winIndex = (result.success && body?.success) ? SECTORS.findIndex(s => s.value === body.win) : -1;
+
+      if (winIndex === -1) {
+        isSpinningRef.current = false;
+        setIsSpinning(false);
+        if (body?.error === 'no_spins') {
+          setCurrentUser(prev => prev ? ({ ...prev, spinsLeft: 0 }) : null);
+          setShowRechargeModal(true);
+        } else if (body?.error === 'daily_limit') {
+          alert(`Plafond journalier atteint (${maxSpinsPerDay} tours/jour). Revenez demain pour retenter votre chance !`);
+        } else {
+          alert("Connexion impossible. Vérifiez votre réseau et réessayez : votre tour n'a pas été utilisé.");
+        }
+        return;
+      }
+
+      chosen = { index: winIndex, sector: SECTORS[winIndex] };
+      serverBalance = Math.max(0, Number(body.player?.balance) || 0);
       setCurrentUser(prev => prev ? ({
         ...prev,
-        spinsLeft: prev.spinsLeft - 1,
+        spinsLeft: Math.max(0, Number(body.player?.spinsLeft) || 0),
         totalSpinsPlayed: prev.totalSpinsPlayed + 1
       }) : null);
     } else {
-      setGuestSpinsLeft(prev => prev - 1);
-    }
-
-    // 🎯 STRATÉGIE D'ATTRACTION (PREMIER TOUR GAGNANT) :
-    // Le 1er tour du joueur (visiteur ou compte avec 0 tour joué) gagne 500 FCFA pour l'accrocher.
-    // Ensuite : AUCUN tour gratuit supplémentaire. Le joueur doit obligatoirement recharger pour continuer.
-    const isFirstTimeSpin = (!currentUser && guestSpinsLeft === 1) || (currentUser && currentUser.totalSpinsPlayed === 0);
-    
-    let chosen: { index: number; sector: Sector };
-    if (isFirstTimeSpin) {
-      // Index 4 correspond exactement à la case 500 FCFA dans SECTORS
+      // 🎯 Visiteur : son UNIQUE tour gratuit gagne 500 FCFA pour l'accrocher.
+      // Ensuite il doit créer un compte et recharger pour continuer.
       const index500 = SECTORS.findIndex(s => s.value === 500);
       const chosenIndex = index500 !== -1 ? index500 : 4;
       chosen = { index: chosenIndex, sector: SECTORS[chosenIndex] };
-    } else {
-      chosen = pickSector();
+      setGuestSpinsLeft(prev => prev - 1);
     }
+
     const sectorAngle = 360 / SECTORS.length;
     const extraRounds = 5 + Math.floor(Math.random() * 3);
     const targetSectorCenter = chosen.index * sectorAngle + sectorAngle / 2;
-    const targetAngle = rotationAngle + (extraRounds * 360) + (360 - targetSectorCenter);
+    // On repart d'un nombre de tours entiers (on efface le décalage du tour précédent),
+    // puis on s'arrête EXACTEMENT au centre de la case tirée, sous le pointeur en haut.
+    const baseAngle = rotationAngle - (rotationAngle % 360);
+    const targetAngle = baseAngle + (extraRounds * 360) + (360 - targetSectorCenter);
 
     setRotationAngle(targetAngle);
 
@@ -478,40 +535,45 @@ export function LuckyWheelApp({
 
     setTimeout(() => {
       clearInterval(tickInterval);
+      isSpinningRef.current = false;
       setIsSpinning(false);
       setLastWin(chosen.sector.value);
       setShowWinModal(true);
 
       if (chosen.sector.value > 0) {
         playSound('win');
-        if (currentUser) {
-          setCurrentUser(prev => prev ? ({
-            ...prev,
-            balance: prev.balance + chosen.sector.value
-          }) : null);
-        } else {
-          setGuestBalance(prev => prev + chosen.sector.value);
-        }
+      }
+      if (currentUser) {
+        // Le solde affiché est celui du serveur
+        setCurrentUser(prev => prev ? ({
+          ...prev,
+          balance: serverBalance !== null ? serverBalance : prev.balance + chosen.sector.value
+        }) : null);
+      } else if (chosen.sector.value > 0) {
+        setGuestBalance(prev => prev + chosen.sector.value);
       }
     }, 4500);
   };
 
-  const handleAuthSubmit = (e: React.FormEvent) => {
+  const handleAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const phoneInput = authPhone.trim().replace(/\s+/g, '');
-    if (phoneInput.length < 9) {
-      setAuthError('Veuillez entrer un numéro valide.');
+    if (!/^\+?\d{9,15}$/.test(phoneInput)) {
+      setAuthError('Veuillez entrer un numéro valide (chiffres uniquement).');
       return;
     }
 
+    // Le compte (tours, solde) est celui du SERVEUR : on va le chercher pour ce numéro
+    const remote = await fetchRemoteSync(phoneInput);
+    const remotePlayer = remote?.players?.[phoneInput];
     const allPlayers: Record<string, PlayerAccount> = JSON.parse(localStorage.getItem('all_players') || '{}');
-    let player = allPlayers[phoneInput];
+    let player: PlayerAccount | undefined = remotePlayer || allPlayers[phoneInput];
 
     if (!player) {
       player = {
         phone: phoneInput,
         registeredAt: new Date().toLocaleDateString('fr-FR'),
-        balance: guestBalance,
+        balance: Math.min(500, guestBalance),
         spinsLeft: 0,
         totalSpinsPlayed: 1,
         sharesCount: 0,
@@ -524,10 +586,14 @@ export function LuckyWheelApp({
     setCurrentUser(player);
     setShowAuthModal(false);
     setAuthError('');
-    setShowRechargeModal(true);
+    if (player.spinsLeft <= 0) {
+      setShowRechargeModal(true);
+    }
 
-    // Envoi au serveur pour que Flore voie le joueur en direct sur l'admin
-    sendRemoteAction('save_player', player);
+    // Nouveau joueur : on l'enregistre sur le serveur pour que Flore le voie
+    if (!remotePlayer) {
+      sendRemoteAction('save_player', player);
+    }
   };
 
   const handleLogout = () => {
@@ -545,20 +611,24 @@ export function LuckyWheelApp({
       }
       setScreenshotName(file.name);
       const reader = new FileReader();
-      reader.onload = (uploadEvent) => {
+      reader.onload = async (uploadEvent) => {
         const base64 = uploadEvent.target?.result as string;
-        setScreenshotData(base64);
+        setScreenshotData(await compressImage(base64));
       };
       reader.readAsDataURL(file);
     }
   };
 
   // ENVOI DE LA PREUVE DE DÉPÔT PAR LE JOUEUR
-  const handleSendDepositProof = (e: React.FormEvent) => {
+  const handleSendDepositProof = async (e: React.FormEvent) => {
     e.preventDefault();
-    const phoneToUse = depositPhone.trim() || (currentUser ? currentUser.phone : '');
-    if (!phoneToUse || phoneToUse.length < 9) {
-      alert('Veuillez entrer votre numéro de téléphone.');
+    if (depositSubmitted) return;
+    const typedPhone = depositPhone.trim().replace(/\s+/g, '');
+    // Les tours sont TOUJOURS crédités sur le compte connecté. Le numéro tapé sert seulement
+    // à dire à Flore avec quel numéro Orange Money le paiement a été fait.
+    const phoneToUse = currentUser ? currentUser.phone : typedPhone;
+    if (!/^\+?\d{9,15}$/.test(phoneToUse)) {
+      alert('Veuillez entrer un numéro de téléphone valide (chiffres uniquement).');
       return;
     }
     if (!screenshotData) {
@@ -570,10 +640,10 @@ export function LuckyWheelApp({
     const newReqId = Date.now().toString();
     setPendingRechargeId(newReqId);
 
-    const pendingRecharges: RechargeRequest[] = JSON.parse(localStorage.getItem('pending_recharges') || '[]');
     const newReq: RechargeRequest = {
       id: newReqId,
       playerPhone: phoneToUse,
+      payerPhone: (currentUser && /^\+?\d{9,15}$/.test(typedPhone) && typedPhone !== currentUser.phone) ? typedPhone : undefined,
       amount: rechargePack.price,
       spins: rechargePack.spins,
       screenshotUrl: screenshotData,
@@ -581,31 +651,40 @@ export function LuckyWheelApp({
       status: 'pending'
     };
 
-    localStorage.setItem('pending_recharges', JSON.stringify([newReq, ...pendingRecharges]));
+    // Transmission vers le tableau de bord de Flore : on attend la confirmation du serveur
+    const result = await sendRemoteAction('submit_recharge', newReq);
+    if (!result.success || result.data?.success === false) {
+      setDepositSubmitted(false);
+      setIsDepositPendingApproval(false);
+      setPendingRechargeId(null);
+      alert(result.data?.error || "Envoi impossible. Vérifiez votre connexion et réessayez.");
+      return;
+    }
     setIsDepositPendingApproval(true);
-
-    // Transmission réseau instantanée vers le tableau de bord de Flore
-    sendRemoteAction('submit_recharge', newReq);
   };
 
-  const handleWithdrawSubmit = (e: React.FormEvent) => {
+  const withdrawingRef = useRef(false);
+  const handleWithdrawSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser || currentUser.balance < minWithdrawAmount) return;
+    if (withdrawingRef.current) return; // anti double-clic
+    withdrawingRef.current = true;
+
+    // Le montant est calculé par le SERVEUR (tout le solde réel du compte) : le téléphone n'envoie aucun montant.
+    const result = await sendRemoteAction('submit_withdraw', { playerPhone: currentUser.phone });
+    if (!result.success || result.data?.success === false) {
+      withdrawingRef.current = false;
+      if (result.data?.player) {
+        const realBalance = Math.max(0, Number(result.data.player.balance) || 0);
+        setCurrentUser(prev => prev ? ({ ...prev, balance: realBalance }) : null);
+      }
+      alert(result.data?.error === 'below_min'
+        ? 'Votre solde est insuffisant pour un retrait.'
+        : (result.data?.error || "Envoi impossible. Vérifiez votre connexion et réessayez."));
+      return;
+    }
 
     setWithdrawSubmitted(true);
-    const amountToWithdraw = currentUser.balance;
-
-    const pendingWithdraws: WithdrawRequest[] = JSON.parse(localStorage.getItem('pending_withdraws') || '[]');
-    const newReq: WithdrawRequest = {
-      id: Date.now().toString(),
-      playerPhone: currentUser.phone,
-      amount: amountToWithdraw,
-      date: new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
-      status: 'pending'
-    };
-    localStorage.setItem('pending_withdraws', JSON.stringify([newReq, ...pendingWithdraws]));
-    sendRemoteAction('submit_withdraw', newReq);
-
     setTimeout(() => {
       setCurrentUser(prev => prev ? ({
         ...prev,
@@ -613,6 +692,7 @@ export function LuckyWheelApp({
       }) : null);
       setWithdrawSubmitted(false);
       setShowWithdrawModal(false);
+      withdrawingRef.current = false;
     }, 2000);
   };
 
@@ -1489,15 +1569,16 @@ export function LuckyWheelApp({
 
                   {/* Soumission de la demande après 10 partages */}
                   <form
-                    onSubmit={(e) => {
+                    onSubmit={async (e) => {
                       e.preventDefault();
+                      if (sharePendingApproval) return;
                       const currentCount = currentUser ? currentUser.sharesCount : guestSharesCount;
                       if (currentCount < 10) {
                         alert("Vous devez partager le lien à 10 personnes avant de soumettre.");
                         return;
                       }
 
-                      const phoneToUse = (currentUser ? currentUser.phone : (sharePlayerPhone.trim() || depositPhone.trim()));
+                      const phoneToUse = (currentUser ? currentUser.phone : (sharePlayerPhone.trim() || depositPhone.trim())).replace(/\s+/g, '');
                       if (!phoneToUse || phoneToUse.length < 9) {
                         alert("Veuillez renseigner votre numéro de téléphone Orange Money.");
                         return;
@@ -1505,7 +1586,6 @@ export function LuckyWheelApp({
 
                       localStorage.setItem('last_share_phone', phoneToUse);
 
-                      const allShareReqs: ShareRewardRequest[] = JSON.parse(localStorage.getItem('pending_share_rewards') || '[]');
                       const newReq: ShareRewardRequest = {
                         id: Date.now().toString(),
                         playerPhone: phoneToUse,
@@ -1516,9 +1596,13 @@ export function LuckyWheelApp({
                         status: 'pending'
                       };
 
-                      localStorage.setItem('pending_share_rewards', JSON.stringify([newReq, ...allShareReqs]));
+                      // On attend la confirmation du serveur avant d'afficher « en attente de validation »
+                      const result = await sendRemoteAction('submit_share', newReq);
+                      if (!result.success || result.data?.success === false) {
+                        alert(result.data?.error || "Envoi impossible. Vérifiez votre connexion et réessayez.");
+                        return;
+                      }
                       setSharePendingApproval(true);
-                      sendRemoteAction('submit_share', newReq);
                     }}
                     className="pt-2 border-t border-slate-800 space-y-2.5"
                   >
@@ -1550,8 +1634,8 @@ export function LuckyWheelApp({
                         const file = e.target.files?.[0];
                         if (file) {
                           const reader = new FileReader();
-                          reader.onload = (uploadEv) => {
-                            setShareProofScreenshot(uploadEv.target?.result as string);
+                          reader.onload = async (uploadEv) => {
+                            setShareProofScreenshot(await compressImage(uploadEv.target?.result as string));
                           };
                           reader.readAsDataURL(file);
                         }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Users, 
   Wallet, 
@@ -35,7 +35,7 @@ import {
 import { PlayerAccount, RechargeRequest, WithdrawRequest, ShareRewardRequest } from './LuckyWheelApp';
 import { downloadAppZip, downloadModifiedFilesZip } from '../utils/clientZip';
 import { getCampayCredentials, saveCampayCredentials, CampayCredentials } from '../utils/campay';
-import { fetchRemoteSync, sendRemoteAction } from '../utils/syncService';
+import { fetchRemoteSync, sendRemoteAction, setAdminPin, fetchScreenshot } from '../utils/syncService';
 
 export interface SponsoredMission {
   id: string;
@@ -135,7 +135,26 @@ export function SecretDashboard({
 
   const [players, setPlayers] = useState<PlayerAccount[]>([]);
   const [recharges, setRecharges] = useState<RechargeRequest[]>([]);
+  // Nombre de tours que Flore décide de débloquer pour chaque dépôt (par défaut : le pack choisi par le joueur)
+  const [spinsToGrant, setSpinsToGrant] = useState<Record<string, number>>({});
+  const approvingRef = useRef<Set<string>>(new Set()); // anti double-clic sur « Valider »
   const [shareRewards, setShareRewards] = useState<ShareRewardRequest[]>([]);
+
+  // Captures d'écran : conservées à part sur le serveur, chargées une seule fois quand elles apparaissent
+  const [shots, setShots] = useState<Record<string, string>>({});
+  const loadingShotsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const wanted: { key: string; kind: 'r' | 's'; id: string }[] = [];
+    recharges.forEach(r => { if (r.hasScreenshot && !r.screenshotUrl) wanted.push({ key: 'r:' + r.id, kind: 'r', id: r.id }); });
+    shareRewards.forEach(s => { if (s.hasScreenshot && !s.screenshotUrl) wanted.push({ key: 's:' + s.id, kind: 's', id: s.id }); });
+    wanted.forEach(async (w) => {
+      if (shots[w.key] || loadingShotsRef.current.has(w.key)) return;
+      loadingShotsRef.current.add(w.key);
+      const data = await fetchScreenshot(w.kind, w.id);
+      if (data) setShots(prev => ({ ...prev, [w.key]: data }));
+      loadingShotsRef.current.delete(w.key);
+    });
+  }, [recharges, shareRewards]);
   const [withdraws, setWithdraws] = useState<WithdrawRequest[]>([]);
   const [totalAdImpressions, setTotalAdImpressions] = useState(0);
   const [totalMissionClicks, setTotalMissionClicks] = useState(0);
@@ -238,7 +257,8 @@ export function SecretDashboard({
   useEffect(() => {
     if (isAuthenticated) {
       loadData();
-      const interval = setInterval(loadData, 2000);
+      // Toutes les 5 s, et seulement quand l'onglet est visible (économise la base de données)
+      const interval = setInterval(() => { if (!document.hidden) loadData(); }, 5000);
       return () => clearInterval(interval);
     }
   }, [isAuthenticated]);
@@ -247,6 +267,7 @@ export function SecretDashboard({
     e.preventDefault();
     const currentSavedPin = localStorage.getItem('owner_secret_pin') || '2026';
     if (pinCode.trim() === currentSavedPin || pinCode.trim() === '2026') {
+      setAdminPin(pinCode.trim()); // le serveur exige ce code pour toute validation
       setIsAuthenticated(true);
       setPinError('');
     } else {
@@ -255,13 +276,44 @@ export function SecretDashboard({
   };
 
   const handleApproveRecharge = async (id: string) => {
+    if (approvingRef.current.has(id)) return; // déjà en cours : on ignore le 2e clic
     const target = recharges.find(r => r.id === id);
-    const updated = recharges.map(r => r.id === id ? { ...r, status: 'approved' as const } : r);
-    setRecharges(updated);
-    localStorage.setItem('pending_recharges', JSON.stringify(updated));
+    if (!target || target.status !== 'pending') return; // déjà traité
 
-    // Débloque et active les tours directement sur le compte du joueur
-    await sendRemoteAction('approve_recharge', { id, spins: target?.spins, playerPhone: target?.playerPhone });
+    // Nombre de tours choisi par Flore (au moins 1)
+    const spins = Math.max(1, Math.floor(Number(spinsToGrant[id] ?? target.spins) || 1));
+
+    if (!window.confirm(`Valider le dépôt de ${target.amount} FCFA de ${target.playerPhone} et débloquer ${spins} tour${spins > 1 ? 's' : ''} ?`)) {
+      return;
+    }
+
+    approvingRef.current.add(id);
+    try {
+      const updated = recharges.map(r => r.id === id ? { ...r, status: 'approved' as const, spins } : r);
+      setRecharges(updated);
+      localStorage.setItem('pending_recharges', JSON.stringify(updated));
+
+      // Le serveur crédite exactement ce nombre de tours, une seule fois
+      const result = await sendRemoteAction('approve_recharge', { id, spins });
+      if (!result.success) {
+        alert("Validation refusée par le serveur (code administrateur incorrect ou connexion coupée). Reconnectez-vous au tableau de bord avec le bon code.");
+      }
+      await loadData();
+    } finally {
+      approvingRef.current.delete(id);
+    }
+  };
+
+  // Ajuster à la main le nombre de tours d'un joueur (ex : corriger un compteur)
+  const handleAdjustSpins = async (phone: string, current: number) => {
+    const input = window.prompt(`Nombre de tours restants pour ${phone} :`, String(current));
+    if (input === null) return;
+    const n = Math.floor(Number(input));
+    if (!Number.isFinite(n) || n < 0) {
+      alert('Nombre invalide.');
+      return;
+    }
+    await sendRemoteAction('admin_set_spins', { phone, spins: n });
     await loadData();
   };
 
@@ -620,7 +672,7 @@ export function SecretDashboard({
               <p className="text-xs text-slate-500 text-center py-6">Aucun dépôt pour le moment.</p>
             ) : (
               <div className="space-y-3">
-                {recharges.map((req) => (
+                {recharges.map(r => ({ ...r, screenshotUrl: r.screenshotUrl || shots['r:' + r.id] })).map((req) => (
                   <div
                     key={req.id}
                     className={`flex flex-col sm:flex-row sm:items-center justify-between p-3.5 rounded-xl border gap-3 text-xs transition ${
@@ -665,6 +717,11 @@ export function SecretDashboard({
                         <p className="text-[11px] text-slate-400 mt-1">
                           Déposé le {req.date}
                         </p>
+                        {req.payerPhone && (
+                          <p className="text-[11px] text-amber-300 mt-0.5">
+                            ⚠️ Payé depuis un autre numéro : <span className="font-mono font-bold">{req.payerPhone}</span> (les tours iront sur le compte {req.playerPhone})
+                          </p>
+                        )}
                         {req.screenshotUrl && (
                           <button
                             type="button"
@@ -678,7 +735,7 @@ export function SecretDashboard({
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2 self-end sm:self-center">
+                    <div className="flex flex-wrap items-center justify-end gap-2 self-end sm:self-center">
                       <span className={`px-2.5 py-1 rounded text-[10px] font-black uppercase ${
                         req.status === 'approved' 
                           ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' 
@@ -690,11 +747,34 @@ export function SecretDashboard({
                       </span>
 
                       {req.status === 'pending' && (
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
+                          {/* Nombre de tours à débloquer (modifiable avant de valider) */}
+                          <div
+                            className="flex items-center gap-1 bg-slate-900 border border-amber-500/40 rounded-lg px-1.5 py-1"
+                            title="Nombre de tours à débloquer pour ce dépôt"
+                          >
+                            <button
+                              type="button"
+                              onClick={() => setSpinsToGrant(prev => ({ ...prev, [req.id]: Math.max(1, (prev[req.id] ?? req.spins) - 1) }))}
+                              className="w-6 h-6 rounded bg-slate-800 hover:bg-slate-700 text-white font-black cursor-pointer"
+                            >
+                              −
+                            </button>
+                            <span className="min-w-[3.6rem] text-center text-[11px] font-black text-amber-300">
+                              {(spinsToGrant[req.id] ?? req.spins)} tour{(spinsToGrant[req.id] ?? req.spins) > 1 ? 's' : ''}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setSpinsToGrant(prev => ({ ...prev, [req.id]: Math.min(100, (prev[req.id] ?? req.spins) + 1) }))}
+                              className="w-6 h-6 rounded bg-slate-800 hover:bg-slate-700 text-white font-black cursor-pointer"
+                            >
+                              +
+                            </button>
+                          </div>
                           <button
                             onClick={() => handleApproveRecharge(req.id)}
                             className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs cursor-pointer shadow flex items-center gap-1"
-                            title="Valider et débloquer les tours du joueur"
+                            title="Valider le dépôt et débloquer le nombre de tours choisi"
                           >
                             <Check className="w-3.5 h-3.5" />
                             <span>Valider</span>
@@ -739,7 +819,7 @@ export function SecretDashboard({
               <p className="text-xs text-slate-500 text-center py-6">Aucune demande de partage pour le moment.</p>
             ) : (
               <div className="space-y-3">
-                {shareRewards.map((req) => (
+                {shareRewards.map(r => ({ ...r, screenshotUrl: r.screenshotUrl || shots['s:' + r.id] })).map((req) => (
                   <div
                     key={req.id}
                     className={`flex flex-col sm:flex-row sm:items-center justify-between p-3.5 rounded-xl border gap-3 text-xs transition ${
@@ -935,6 +1015,13 @@ export function SecretDashboard({
                         <p className="text-[10px] text-slate-400">
                           {p.spinsLeft} tours restants en réserve
                         </p>
+                        <button
+                          type="button"
+                          onClick={() => handleAdjustSpins(p.phone, p.spinsLeft)}
+                          className="mt-0.5 text-[10px] text-amber-400 hover:underline font-semibold cursor-pointer"
+                        >
+                          Ajuster les tours
+                        </button>
                       </div>
 
                       <button
