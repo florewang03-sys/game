@@ -189,6 +189,16 @@ export function LuckyWheelApp({
   // États de la roue
   const [isSpinning, setIsSpinning] = useState(false);
   const initialCheckRef = useRef(false);
+  const serverSeenRef = useRef(false); // vrai si le compte de ce joueur a déjà été vu sur le serveur
+
+  // Le compte n'existe plus sur le serveur (supprimé par l'administrateur) : on déconnecte proprement
+  const accountRemoved = () => {
+    serverSeenRef.current = false;
+    alert("Votre compte n'existe plus sur le serveur. Reconnectez-vous avec votre numéro pour continuer.");
+    setCurrentUser(null);
+    localStorage.removeItem('active_player');
+    setIsDepositPendingApproval(false);
+  };
   const isSpinningRef = useRef(false); // vrai pendant qu'un tour est en cours (évite les resynchronisations parasites)
   const [rotationAngle, setRotationAngle] = useState(0);
   const [lastWin, setLastWin] = useState<number | null>(null);
@@ -255,7 +265,12 @@ export function LuckyWheelApp({
 
       // 1. Joueur connecté : on recopie UNIQUEMENT le compteur de tours du compte serveur
       //    (jamais pendant qu'un tour est en cours, pour ne pas fausser le décompte)
+      if (currentUser && !remoteData.players?.[currentUser.phone] && serverSeenRef.current && !isSpinningRef.current) {
+        accountRemoved();
+        return;
+      }
       if (currentUser && remoteData?.players?.[currentUser.phone] && !isSpinningRef.current) {
+        serverSeenRef.current = true;
         const serverSpins = Math.max(0, Number(remoteData.players[currentUser.phone].spinsLeft) || 0);
         if (serverSpins !== currentUser.spinsLeft) {
           setCurrentUser(prev => (prev && prev.phone === currentUser.phone) ? ({ ...prev, spinsLeft: serverSpins }) : prev);
@@ -495,6 +510,8 @@ export function LuckyWheelApp({
         if (body?.error === 'no_spins') {
           setCurrentUser(prev => prev ? ({ ...prev, spinsLeft: 0 }) : null);
           setShowRechargeModal(true);
+        } else if (body?.error === 'unknown_player') {
+          accountRemoved();
         } else if (body?.error === 'daily_limit') {
           alert(`Plafond journalier atteint (${maxSpinsPerDay} tours/jour). Revenez demain pour retenter votre chance !`);
         } else {

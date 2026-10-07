@@ -1,10 +1,6 @@
 {
   "rewrites": [
     {
-      "source": "/api/campay/(.*)",
-      "destination": "/api/campay-$1"
-    },
-    {
       "source": "/((?!api/).*)",
       "destination": "/index.html"
     }

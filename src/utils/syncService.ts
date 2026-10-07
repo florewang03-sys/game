@@ -16,11 +16,19 @@ function adminHeaders(): Record<string, string> {
   return adminPin ? { 'x-admin-pin': adminPin } : {};
 }
 
+// État de la dernière connexion au serveur (affiché dans le tableau de bord de Flore)
+export type SyncStatus = 'unknown' | 'ok' | 'denied' | 'nodb' | 'offline';
+let lastSyncStatus: SyncStatus = 'unknown';
+export function getSyncStatus(): SyncStatus {
+  return lastSyncStatus;
+}
+
 // Joueur : on ne reçoit QUE ses propres données (on passe son numéro). Flore (code admin) reçoit tout.
 export async function fetchRemoteSync(phone?: string): Promise<SyncData | null> {
   try {
     const url = phone ? `/api/sync?phone=${encodeURIComponent(phone)}` : '/api/sync';
     const res = await fetch(url, { headers: adminHeaders() });
+    lastSyncStatus = res.ok ? 'ok' : (res.status === 401 || res.status === 429) ? 'denied' : res.status === 503 ? 'nodb' : 'offline';
     if (res.ok) {
       const data: SyncData = await res.json();
       if (data && typeof data === 'object') {
@@ -33,7 +41,7 @@ export async function fetchRemoteSync(phone?: string): Promise<SyncData | null> 
       }
     }
   } catch (err) {
-    // Mode déconnecté ou local
+    lastSyncStatus = 'offline'; // Mode déconnecté ou local
   }
   return null;
 }

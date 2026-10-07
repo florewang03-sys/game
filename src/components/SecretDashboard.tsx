@@ -34,8 +34,7 @@ import {
 } from 'lucide-react';
 import { PlayerAccount, RechargeRequest, WithdrawRequest, ShareRewardRequest } from './LuckyWheelApp';
 import { downloadAppZip, downloadModifiedFilesZip } from '../utils/clientZip';
-import { getCampayCredentials, saveCampayCredentials, CampayCredentials } from '../utils/campay';
-import { fetchRemoteSync, sendRemoteAction, setAdminPin, fetchScreenshot } from '../utils/syncService';
+import { fetchRemoteSync, sendRemoteAction, setAdminPin, fetchScreenshot, getSyncStatus, SyncStatus } from '../utils/syncService';
 
 export interface SponsoredMission {
   id: string;
@@ -170,34 +169,81 @@ export function SecretDashboard({
   const [downloadingZip, setDownloadingZip] = useState(false);
   const [downloadZipMsg, setDownloadZipMsg] = useState('');
 
-  // Clés API CamPay (DGSN Style)
-  const [campayCreds, setCampayCreds] = useState<CampayCredentials>(() => getCampayCredentials());
-  const [campaySavedToast, setCampaySavedToast] = useState(false);
 
   // Aperçu de la capture d'écran reçue du joueur
   const [previewScreenshotUrl, setPreviewScreenshotUrl] = useState<string | null>(null);
 
-  // Détection des nouveaux dépôts et partages pour alerte sonore
+  // 🔔 NOTIFICATIONS : son + vibration + bandeau + notification du navigateur à chaque NOUVELLE demande
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>('unknown');
+  const [lastSync, setLastSync] = useState('');
+  const [dataLoaded, setDataLoaded] = useState(false);
+  const [alertMsg, setAlertMsg] = useState('');
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const seenPendingRef = useRef<Set<string> | null>(null);
+
+  const unlockAudio = () => {
+    try {
+      const Ctx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!audioCtxRef.current) audioCtxRef.current = new Ctx();
+      if (audioCtxRef.current.state === 'suspended') audioCtxRef.current.resume();
+    } catch (e) {}
+  };
+
+  const beep = () => {
+    try {
+      unlockAudio();
+      const ctx = audioCtxRef.current;
+      if (!ctx) return;
+      [0, 0.25, 0.5].forEach((delay, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.frequency.value = i === 2 ? 1100 : 880;
+        const t = ctx.currentTime + delay;
+        gain.gain.setValueAtTime(0.15, t);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+        osc.start(t);
+        osc.stop(t + 0.2);
+      });
+    } catch (e) {}
+  };
+
   useEffect(() => {
-    if (isAuthenticated) {
-      const pendingRechargesCount = recharges.filter(r => r.status === 'pending').length;
-      const pendingSharesCount = shareRewards.filter(s => s.status === 'pending').length;
-      if (pendingRechargesCount > 0 || pendingSharesCount > 0) {
-        try {
-          const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-          const osc = audioCtx.createOscillator();
-          const gain = audioCtx.createGain();
-          osc.connect(gain);
-          gain.connect(audioCtx.destination);
-          osc.frequency.setValueAtTime(800, audioCtx.currentTime);
-          gain.gain.setValueAtTime(0.08, audioCtx.currentTime);
-          gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
-          osc.start();
-          osc.stop(audioCtx.currentTime + 0.3);
-        } catch (e) {}
-      }
+    if (!isAuthenticated || !dataLoaded) return;
+    const items = [
+      ...recharges.filter(r => r.status === 'pending').map(r => ({ id: 'r:' + r.id, label: `dépôt de ${r.amount} FCFA (${r.playerPhone})` })),
+      ...shareRewards.filter(s => s.status === 'pending').map(s => ({ id: 's:' + s.id, label: `partage (${s.playerPhone})` })),
+      ...withdraws.filter(w => w.status === 'pending').map(w => ({ id: 'w:' + w.id, label: `retrait de ${w.amount} FCFA (${w.playerPhone})` }))
+    ];
+    const seen = seenPendingRef.current;
+    seenPendingRef.current = new Set(items.map(i => i.id));
+
+    if (seen === null) {
+      // Première ouverture : on signale ce qui attend déjà, sans sonner
+      if (items.length > 0) setAlertMsg(`📥 ${items.length} demande(s) en attente de traitement`);
+      return;
     }
-  }, [recharges, shareRewards, isAuthenticated]);
+    const fresh = items.filter(i => !seen.has(i.id));
+    if (fresh.length === 0) return;
+
+    const msg = fresh.length === 1 ? `🔔 Nouvelle demande : ${fresh[0].label}` : `🔔 ${fresh.length} nouvelles demandes à traiter`;
+    setAlertMsg(msg);
+    beep();
+    try { navigator.vibrate?.([200, 100, 200]); } catch (e) {}
+    try {
+      if ('Notification' in window && Notification.permission === 'granted') new Notification("Roue d'Or 237", { body: msg });
+    } catch (e) {}
+    if (document.hidden) document.title = `🔔 (${fresh.length}) Nouvelle demande`;
+  }, [recharges, shareRewards, withdraws, isAuthenticated, dataLoaded]);
+
+  // Remet le titre normal quand Flore revient sur l'onglet
+  useEffect(() => {
+    const baseTitle = document.title;
+    const onVisible = () => { if (!document.hidden) document.title = baseTitle; };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
 
   const handleDirectZipDownload = async () => {
     try {
@@ -225,7 +271,10 @@ export function SecretDashboard({
 
   const loadData = async () => {
     const remoteData = await fetchRemoteSync();
+    setSyncStatus(getSyncStatus());
     if (remoteData) {
+      setDataLoaded(true);
+      setLastSync(new Date().toLocaleTimeString('fr-FR'));
       setPlayers(Object.values(remoteData.players || {}));
       setRecharges(remoteData.recharges || []);
       setShareRewards(remoteData.shareRewards || []);
@@ -263,15 +312,27 @@ export function SecretDashboard({
     }
   }, [isAuthenticated]);
 
-  const handlePinSubmit = (e: React.FormEvent) => {
+  const handlePinSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const currentSavedPin = localStorage.getItem('owner_secret_pin') || '2026';
-    if (pinCode.trim() === currentSavedPin || pinCode.trim() === '2026') {
-      setAdminPin(pinCode.trim()); // le serveur exige ce code pour toute validation
+    unlockAudio(); // autorise le son (le navigateur exige un clic)
+    try {
+      if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
+    } catch (err) {}
+
+    // Le code est vérifié par le SERVEUR (pas seulement dans le navigateur)
+    setAdminPin(pinCode.trim());
+    await fetchRemoteSync();
+    const status = getSyncStatus();
+    if (status === 'ok') {
       setIsAuthenticated(true);
       setPinError('');
     } else {
-      setPinError('Code PIN incorrect.');
+      setAdminPin('');
+      setPinError(
+        status === 'denied' ? 'Code PIN incorrect (ou trop d\'essais : réessayez dans 15 minutes).'
+        : status === 'nodb' ? 'Base de données non connectée (Upstash) : voir Vercel → Storage.'
+        : 'Serveur injoignable. Vérifiez votre connexion.'
+      );
     }
   };
 
@@ -365,23 +426,17 @@ export function SecretDashboard({
     setTimeout(() => setLinksSavedToast(false), 3000);
   };
 
-  const handleDeletePlayer = (phoneToDelete: string) => {
-    if (window.confirm(`Confirmez-vous la suppression définitive du joueur ${phoneToDelete} ?`)) {
-      const rawPlayers: Record<string, PlayerAccount> = JSON.parse(localStorage.getItem('all_players') || '{}');
-      delete rawPlayers[phoneToDelete];
-      localStorage.setItem('all_players', JSON.stringify(rawPlayers));
-      setPlayers(Object.values(rawPlayers));
+  const handleDeletePlayer = async (phoneToDelete: string) => {
+    const target = players.find(p => p.phone === phoneToDelete);
+    const detail = target ? ` Il perdra ses ${target.spinsLeft} tour(s) et son solde de ${target.balance} FCFA.` : '';
+    if (!window.confirm(`Confirmez-vous la suppression définitive du compte ${phoneToDelete} ?${detail}`)) return;
 
-      const activeUser = localStorage.getItem('active_player');
-      if (activeUser) {
-        try {
-          const parsed = JSON.parse(activeUser);
-          if (parsed.phone === phoneToDelete) {
-            localStorage.removeItem('active_player');
-          }
-        } catch (e) {}
-      }
+    const result = await sendRemoteAction('admin_delete_player', { phone: phoneToDelete });
+    if (!result.success || result.data?.success === false) {
+      alert(result.data?.error || 'Suppression impossible (code administrateur refusé ou serveur injoignable).');
+      return;
     }
+    await loadData();
   };
 
   const totalEncaissé = recharges
@@ -452,6 +507,13 @@ export function SecretDashboard({
             <div>
               <h1 className="text-sm font-black text-white leading-tight">TABLEAU DE BORD PROPRIÉTAIRE</h1>
               <p className="text-[10px] text-slate-400">Totalement invisible aux joueurs</p>
+              <p className={`text-[10px] font-bold ${syncStatus === 'ok' ? 'text-emerald-400' : syncStatus === 'offline' ? 'text-orange-400' : syncStatus === 'unknown' ? 'text-slate-500' : 'text-red-400'}`}>
+                {syncStatus === 'ok' ? `🟢 Connecté au serveur${lastSync ? ' · ' + lastSync : ''}`
+                  : syncStatus === 'denied' ? '🔴 Code refusé par le serveur : reconnectez-vous'
+                  : syncStatus === 'nodb' ? '🔴 Base de données non connectée (Upstash)'
+                  : syncStatus === 'offline' ? '🟠 Serveur injoignable'
+                  : '…'}
+              </p>
             </div>
           </div>
 
@@ -483,6 +545,14 @@ export function SecretDashboard({
           </div>
         </div>
       </header>
+
+      {/* 🔔 Alerte de nouvelle demande */}
+      {alertMsg && (
+        <div className="bg-amber-400 text-slate-950 px-4 py-2 text-xs font-black flex items-center justify-between gap-3">
+          <span>{alertMsg}</span>
+          <button onClick={() => setAlertMsg('')} className="px-2 py-0.5 rounded bg-slate-950/20 hover:bg-slate-950/30 cursor-pointer">OK</button>
+        </div>
+      )}
 
       {/* Onglets */}
       <div className="bg-slate-900/60 border-b border-slate-800 px-4">
@@ -1039,7 +1109,7 @@ export function SecretDashboard({
           </div>
         )}
 
-        {/* ⚙️ PARAMÈTRES & RÉGLAGES CAMPAY */}
+        {/* ⚙️ PARAMÈTRES & RÉGLAGES */}
         {activeTab === 'settings' && (
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 max-w-xl mx-auto space-y-4 text-xs">
             <h3 className="text-sm font-black text-white mb-1">Paramètres de Réception & Retraits</h3>
@@ -1083,98 +1153,12 @@ export function SecretDashboard({
               </p>
             </div>
 
-            {/* 🚀 CONFIGURATION OFFICIELLE CAMPAY (STYLE DGSN) */}
-            <div className="p-4 rounded-2xl bg-slate-950 border border-emerald-500/40 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold">
-                    <ShieldCheck className="w-4 h-4" />
-                  </span>
-                  <h4 className="text-xs font-black text-white">Passerelle Officielle CamPay (Style DGSN)</h4>
-                </div>
-                <span className="text-[10px] bg-emerald-950 text-emerald-400 font-bold px-2 py-0.5 rounded-full border border-emerald-500/30">
-                  Connecté
-                </span>
-              </div>
-
-              <p className="text-[11px] text-slate-400">
-                Vos clés d'accès API fournies par CamPay pour envoyer la demande de retrait direct aux clients (Orange Money uniquement) :
-              </p>
-
-              <div>
-                <label className="block text-[10px] text-slate-300 font-bold mb-1">
-                  Nom d'utilisateur de l'application (Username / Client ID) :
-                </label>
-                <input
-                  type="text"
-                  value={campayCreds.appUsername}
-                  onChange={(e) => setCampayCreds({ ...campayCreds, appUsername: e.target.value })}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono text-[11px] focus:border-emerald-400"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[10px] text-slate-300 font-bold mb-1">
-                  Mot de passe de l'application (Password / Secret) :
-                </label>
-                <input
-                  type="password"
-                  value={campayCreds.appPassword}
-                  onChange={(e) => setCampayCreds({ ...campayCreds, appPassword: e.target.value })}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono text-[11px] focus:border-emerald-400"
-                />
-              </div>
-
-              <div className="flex items-center justify-between pt-2">
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const next = campayCreds.environment === 'live' ? 'demo' : 'live';
-                      setCampayCreds({ ...campayCreds, environment: next });
-                    }}
-                    className={`px-2.5 py-1 rounded-lg text-[10px] font-bold border ${
-                      campayCreds.environment === 'live'
-                        ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
-                        : 'bg-amber-500/20 text-amber-400 border-amber-500/40'
-                    }`}
-                  >
-                    Mode : {campayCreds.environment === 'live' ? 'PRODUCTION (LIVE)' : 'DÉMO (TEST)'}
-                  </button>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    saveCampayCredentials(campayCreds);
-                    setCampaySavedToast(true);
-                    setTimeout(() => setCampaySavedToast(false), 3000);
-                  }}
-                  className="px-4 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs flex items-center gap-1 cursor-pointer transition shadow"
-                >
-                  <Save className="w-3.5 h-3.5" />
-                  <span>{campaySavedToast ? 'Enregistré !' : 'Enregistrer les Clés'}</span>
-                </button>
-              </div>
-            </div>
-
-            {/* Modifier le Code PIN Secret */}
+            {/* Code administrateur */}
             <div className="pt-3 border-t border-slate-800">
-              <label className="block text-slate-300 font-bold mb-1">
-                🔒 Modifier votre Code PIN Secret Propriétaire :
-              </label>
-              <input
-                type="text"
-                placeholder="Nouveau code PIN (Ex: 8899)"
-                onChange={(e) => {
-                  if (e.target.value.trim().length >= 4) {
-                    localStorage.setItem('owner_secret_pin', e.target.value.trim());
-                  }
-                }}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono focus:border-amber-400"
-              />
-              <p className="text-[10px] text-slate-500 mt-1">
-                Par défaut 2026. Si vous changez, votre nouveau code secret est immédiatement sauvegardé.
+              <p className="text-slate-300 font-bold mb-1">🔒 Code administrateur</p>
+              <p className="text-[10px] text-slate-500">
+                Le code est vérifié par le serveur. Par défaut : 2026. Pour le changer, modifiez la variable ADMIN_PIN dans Vercel
+                (Settings → Environment Variables), puis redéployez.
               </p>
             </div>
           </div>

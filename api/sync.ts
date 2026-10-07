@@ -48,7 +48,7 @@ const MAX_PIN_FAILS = 10; // essais ratés autorisés par adresse IP (15 minutes
 const ADMIN_ACTIONS = [
   'approve_recharge', 'reject_recharge',
   'approve_share', 'reject_share',
-  'complete_withdraw', 'admin_set_spins'
+  'complete_withdraw', 'admin_set_spins', 'admin_delete_player'
 ];
 
 // 🎡 Table des lots — TIRAGE FAIT ICI, PAR LE SERVEUR. L'ordre des cases n'a pas d'importance :
@@ -470,6 +470,23 @@ async function applyAction(state: GameState, action: string, payload: any, store
     return { status: 200, body: { success: true, players: state.players }, dirty: true };
   }
 
+  // 12. Suppression d'un compte joueur (code admin)
+  // Refusée tant que le joueur a de l'argent en jeu : un dépôt à valider ou un retrait à payer.
+  if (action === 'admin_delete_player') {
+    if (!isPhone(payload.phone)) return fail(400, 'Numéro invalide');
+    if (!state.players[payload.phone]) {
+      return { status: 200, body: { success: true, players: state.players } }; // déjà supprimé
+    }
+    if (state.withdraws.some(w => w.playerPhone === payload.phone && w.status === 'pending')) {
+      return fail(409, 'Ce joueur a un retrait en attente : payez-le d\'abord.');
+    }
+    if (state.recharges.some(r => r.playerPhone === payload.phone && r.status === 'pending')) {
+      return fail(409, 'Ce joueur a un dépôt en attente : validez ou refusez-le d\'abord.');
+    }
+    delete state.players[payload.phone];
+    return { status: 200, body: { success: true, players: state.players }, dirty: true };
+  }
+
   return fail(400, 'Action non reconnue');
 }
 
@@ -501,9 +518,15 @@ export default async function handler(req: any, res: any) {
         return res.status(200).json({ screenshotUrl: await store.getShot(shotKey) });
       }
 
+      // Un code fourni mais faux/bloqué est refusé clairement (le tableau de bord s'en sert pour vérifier la connexion)
+      if (isAdminCall && adminState !== 'ok') {
+        return res.status(adminState === 'blocked' ? 429 : 401).json({
+          error: adminState === 'blocked' ? 'Trop d\'essais, réessayez dans 15 minutes' : 'Code administrateur incorrect'
+        });
+      }
+
       const state = await store.load();
       if (adminState === 'ok') return res.status(200).json(state);
-      if (adminState === 'blocked') return res.status(429).json({ error: 'Trop d\'essais, réessayez dans 15 minutes' });
       // Public : seulement les données du joueur demandé (jamais la liste des autres numéros)
       return res.status(200).json(publicView(state, typeof req.query?.phone === 'string' ? req.query.phone : undefined));
     }
