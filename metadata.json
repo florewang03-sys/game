@@ -1,0 +1,6 @@
+{
+  "name": "Pixel et Trait — Studio Digital & Faire-parts Interactifs",
+  "description": "Studio de création web sur-mesure, identité visuelle et faire-parts digitaux interactifs pour cérémonies (mariages, baptêmes, anniversaires).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
