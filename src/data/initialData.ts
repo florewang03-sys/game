@@ -16,6 +16,11 @@ export const STUDIO_INFO = {
   whatsappUrl: (message: string) => `https://wa.me/237651887722?text=${encodeURIComponent(message)}`,
 };
 
+// Configuration directe de votre base Upstash Redis
+const UPSTASH_URL = 'https://assured-oriole-206253.upstash.io';
+const UPSTASH_TOKEN = 'gQAAAAAAAyWtAAIgcDEwZmRkZGY2YjE2MjY0ZGU4OTAxNmI5ZTRmMzA2MzA2YQ';
+const UPSTASH_KEY = 'pixel_et_trait_catalog_cloud';
+
 export const WEDDING_PILLARS = [
   { id: '1', title: '1. Notre histoire', desc: 'Récit intime et émouvant de votre rencontre, de la demande et de vos vœux.' },
   { id: '2', title: '2. Compte à rebours', desc: 'Horloge animée en direct jusqu’au grand jour pour faire monter l’émotion.' },
@@ -249,18 +254,19 @@ export const INITIAL_INFOGRAPHIE_ITEMS: InfographieItem[] = [
 
 const STORAGE_CATALOG_KEY = 'pixel_et_trait_full_catalog_v3';
 
-export function getStudioCatalog(): StudioCatalogState {
+export const DEFAULT_CATALOG: StudioCatalogState = {
+  weddingModels: INITIAL_WEDDING_MODELS,
+  saveTheDateItems: INITIAL_SAVE_THE_DATE,
+  guestGifts: INITIAL_GUEST_GIFTS,
+  webProjects: INITIAL_WEB_PROJECTS,
+  infographieItems: INITIAL_INFOGRAPHIE_ITEMS,
+};
+
+// 1. Sauvegarde locale de secours
+export function getStudioCatalogLocal(): StudioCatalogState {
   try {
     const raw = localStorage.getItem(STORAGE_CATALOG_KEY);
-    if (!raw) {
-      return {
-        weddingModels: INITIAL_WEDDING_MODELS,
-        saveTheDateItems: INITIAL_SAVE_THE_DATE,
-        guestGifts: INITIAL_GUEST_GIFTS,
-        webProjects: INITIAL_WEB_PROJECTS,
-        infographieItems: INITIAL_INFOGRAPHIE_ITEMS,
-      };
-    }
+    if (!raw) return DEFAULT_CATALOG;
     const parsed = JSON.parse(raw);
     return {
       weddingModels: parsed.weddingModels || INITIAL_WEDDING_MODELS,
@@ -270,20 +276,59 @@ export function getStudioCatalog(): StudioCatalogState {
       infographieItems: parsed.infographieItems || INITIAL_INFOGRAPHIE_ITEMS,
     };
   } catch {
-    return {
-      weddingModels: INITIAL_WEDDING_MODELS,
-      saveTheDateItems: INITIAL_SAVE_THE_DATE,
-      guestGifts: INITIAL_GUEST_GIFTS,
-      webProjects: INITIAL_WEB_PROJECTS,
-      infographieItems: INITIAL_INFOGRAPHIE_ITEMS,
-    };
+    return DEFAULT_CATALOG;
   }
 }
 
-export function saveStudioCatalog(state: StudioCatalogState) {
+export function saveStudioCatalogLocal(state: StudioCatalogState) {
   try {
     localStorage.setItem(STORAGE_CATALOG_KEY, JSON.stringify(state));
   } catch (err) {
-    console.error('Failed to save studio catalog', err);
+    console.error('Failed to save studio catalog locally', err);
+  }
+}
+
+// 2. Synchronisation Cloud avec votre base Upstash Redis
+export async function fetchCatalogFromUpstash(): Promise<StudioCatalogState | null> {
+  try {
+    const res = await fetch(`${UPSTASH_URL}/get/${UPSTASH_KEY}`, {
+      headers: {
+        Authorization: `Bearer ${UPSTASH_TOKEN}`,
+      },
+    });
+
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data.result) return null;
+
+    const parsed = typeof data.result === 'string' ? JSON.parse(data.result) : data.result;
+    return {
+      weddingModels: parsed.weddingModels || INITIAL_WEDDING_MODELS,
+      saveTheDateItems: parsed.saveTheDateItems || INITIAL_SAVE_THE_DATE,
+      guestGifts: parsed.guestGifts || INITIAL_GUEST_GIFTS,
+      webProjects: parsed.webProjects || INITIAL_WEB_PROJECTS,
+      infographieItems: parsed.infographieItems || INITIAL_INFOGRAPHIE_ITEMS,
+    };
+  } catch (err) {
+    console.warn('Upstash fetch failed, using local storage', err);
+    return null;
+  }
+}
+
+export async function saveCatalogToUpstash(state: StudioCatalogState): Promise<boolean> {
+  try {
+    const res = await fetch(`${UPSTASH_URL}/set/${UPSTASH_KEY}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${UPSTASH_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(state),
+    });
+
+    return res.ok;
+  } catch (err) {
+    console.error('Failed to save to Upstash', err);
+    return false;
   }
 }

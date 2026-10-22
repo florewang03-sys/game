@@ -11,47 +11,41 @@ import { AdminModal } from './components/AdminModal';
 import { Footer } from './components/Footer';
 import { StudioCatalogState } from './types';
 import { 
-  getStudioCatalog, 
-  saveStudioCatalog, 
-  INITIAL_WEDDING_MODELS, 
-  INITIAL_SAVE_THE_DATE, 
-  INITIAL_GUEST_GIFTS, 
-  INITIAL_WEB_PROJECTS, 
-  INITIAL_INFOGRAPHIE_ITEMS 
+  getStudioCatalogLocal, 
+  saveStudioCatalogLocal,
+  fetchCatalogFromUpstash,
+  saveCatalogToUpstash,
+  DEFAULT_CATALOG
 } from './data/initialData';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavTab>('site-mariage');
-  const [catalog, setCatalog] = useState<StudioCatalogState>({
-    weddingModels: INITIAL_WEDDING_MODELS,
-    saveTheDateItems: INITIAL_SAVE_THE_DATE,
-    guestGifts: INITIAL_GUEST_GIFTS,
-    webProjects: INITIAL_WEB_PROJECTS,
-    infographieItems: INITIAL_INFOGRAPHIE_ITEMS,
-  });
+  const [catalog, setCatalog] = useState<StudioCatalogState>(() => getStudioCatalogLocal());
   const [isAdminOpen, setIsAdminOpen] = useState(false);
 
   useEffect(() => {
-    const loaded = getStudioCatalog();
-    setCatalog(loaded);
+    const local = getStudioCatalogLocal();
+    setCatalog(local);
+
+    fetchCatalogFromUpstash().then((cloudData) => {
+      if (cloudData) {
+        setCatalog(cloudData);
+        saveStudioCatalogLocal(cloudData);
+      }
+    });
   }, []);
 
-  const handleSaveCatalog = (updated: StudioCatalogState) => {
+  const handleSaveCatalog = async (updated: StudioCatalogState) => {
     setCatalog(updated);
-    saveStudioCatalog(updated);
+    saveStudioCatalogLocal(updated);
+    await saveCatalogToUpstash(updated);
   };
 
-  const handleResetCatalog = () => {
-    if (confirm('Voulez-vous restaurer le catalogue d’origine pour toutes les rubriques ?')) {
-      const resetState: StudioCatalogState = {
-        weddingModels: INITIAL_WEDDING_MODELS,
-        saveTheDateItems: INITIAL_SAVE_THE_DATE,
-        guestGifts: INITIAL_GUEST_GIFTS,
-        webProjects: INITIAL_WEB_PROJECTS,
-        infographieItems: INITIAL_INFOGRAPHIE_ITEMS,
-      };
-      setCatalog(resetState);
-      saveStudioCatalog(resetState);
+  const handleResetCatalog = async () => {
+    if (confirm('Voulez-vous restaurer le catalogue d’origine ?')) {
+      setCatalog(DEFAULT_CATALOG);
+      saveStudioCatalogLocal(DEFAULT_CATALOG);
+      await saveCatalogToUpstash(DEFAULT_CATALOG);
     }
   };
 
@@ -79,14 +73,12 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col bg-[#0c0c0c] text-white selection:bg-[#e5b869]/20 selection:text-white">
-      {/* Top Navigation Bar with gold active underline and WhatsApp button */}
       <Navbar
         activeTab={activeTab}
         onTabChange={handleTabChange}
         onOpenAdmin={() => setIsAdminOpen(true)}
       />
 
-      {/* Main Dynamic View based on activeTab */}
       <main className="flex-1">
         {activeTab === 'accueil' && (
           <HomeOverview onNavigateTab={handleTabChange} />
@@ -125,16 +117,13 @@ export default function App() {
         )}
       </main>
 
-      {/* Footer with Denver location and WhatsApp action */}
       <Footer onOpenAdmin={() => setIsAdminOpen(true)} />
 
-      {/* Floating Status Pill matching reference screenshots */}
       <FloatingStatusPill
         activeTab={activeTab}
         onSelectNextTab={handleCycleTab}
       />
 
-      {/* Full Admin Modal for Flore to manage all 5 sections */}
       <AdminModal
         isOpen={isAdminOpen}
         onClose={() => setIsAdminOpen(false)}
