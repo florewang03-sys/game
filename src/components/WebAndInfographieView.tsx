@@ -5,16 +5,17 @@ import { WebProjectItem, InfographieItem } from '../types';
 
 interface WebAndInfographieViewProps {
   mode: 'dev-web' | 'infographie';
-  webProjects: WebProjectItem[];
-  infographieItems: InfographieItem[];
+  webProjects?: WebProjectItem[];
+  infographieItems?: InfographieItem[];
 }
 
 export const WebAndInfographieView: React.FC<WebAndInfographieViewProps> = ({ 
   mode, 
-  webProjects, 
-  infographieItems 
+  webProjects = [], 
+  infographieItems = [] 
 }) => {
   const isDev = mode === 'dev-web';
+
 
   return (
     <section className="py-12 sm:py-16 bg-[#0c0c0c] text-white text-left">

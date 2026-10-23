@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Lock, Plus, Trash2, Check, RefreshCw, KeyRound, ExternalLink, Image as ImageIcon } from 'lucide-react';
+import { X, Lock, Plus, Trash2, Check, RefreshCw, KeyRound, ExternalLink, Image as ImageIcon, Download } from 'lucide-react';
 import { 
   StudioCatalogState, 
   CeremonyModel, 
@@ -9,13 +9,18 @@ import {
   InfographieItem,
   CeremonyCategory
 } from '../types';
+import { fetchCatalogFromUpstash } from '../data/initialData';
 
 interface AdminModalProps {
   isOpen: boolean;
   onClose: () => void;
-  catalog: StudioCatalogState;
-  onSaveCatalog: (newCatalog: StudioCatalogState) => void;
-  onResetCatalog: () => void;
+  catalog?: StudioCatalogState;
+  onSaveCatalog?: (newCatalog: StudioCatalogState) => Promise<boolean> | void;
+  onResetCatalog?: () => void;
+  // Legacy props support
+  models?: CeremonyModel[];
+  onSaveModels?: (models: CeremonyModel[]) => void;
+  onResetModels?: () => void;
 }
 
 type AdminSection = 'mariage' | 'save_the_date' | 'cadeaux' | 'web' | 'infographie';
@@ -23,13 +28,76 @@ type AdminSection = 'mariage' | 'save_the_date' | 'cadeaux' | 'web' | 'infograph
 export const AdminModal: React.FC<AdminModalProps> = ({
   isOpen,
   onClose,
-  catalog,
+  catalog: incomingCatalog,
   onSaveCatalog,
   onResetCatalog,
+  models = [],
+  onSaveModels,
+  onResetModels,
 }) => {
+  const catalog: StudioCatalogState = incomingCatalog || {
+    weddingModels: models.length > 0 ? models : [],
+    saveTheDateItems: [],
+    guestGifts: [],
+    webProjects: [],
+    infographieItems: [],
+  };
+
+  const [isPushingCloud, setIsPushingCloud] = useState(false);
+  const [isCloudLoading, setIsCloudLoading] = useState(false);
+
+  const handleSave = async (newCatalog: StudioCatalogState): Promise<boolean> => {
+    if (onSaveCatalog) {
+      const res = await onSaveCatalog(newCatalog);
+      return res !== false;
+    } else if (onSaveModels) {
+      onSaveModels(newCatalog.weddingModels);
+      return true;
+    }
+    return false;
+  };
+
+  const handlePushCurrentToCloud = async () => {
+    setIsPushingCloud(true);
+    try {
+      const ok = await handleSave(catalog);
+      if (ok) {
+        alert('✅ Les données de cet appareil ont été enregistrées avec succès dans la base Upstash Cloud !\n\nVous pouvez maintenant ouvrir ou actualiser votre machine pour voir exactement la même chose.');
+      } else {
+        alert('⚠️ Impossible d’enregistrer dans Upstash Cloud. Vérifiez votre connexion Internet.');
+      }
+    } catch {
+      alert('⚠️ Erreur de connexion avec la base de données Upstash.');
+    } finally {
+      setIsPushingCloud(false);
+    }
+  };
+
+  const handleReset = () => {
+    if (onResetCatalog) onResetCatalog();
+    else if (onResetModels) onResetModels();
+  };
+
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [passcode, setPasscode] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+
+  const handleReloadFromCloud = async () => {
+    setIsCloudLoading(true);
+    try {
+      const cloud = await fetchCatalogFromUpstash();
+      if (cloud) {
+        await handleSave(cloud);
+        alert('✅ Données rechargées avec succès depuis Upstash Cloud !');
+      } else {
+        alert('⚠️ Impossible de joindre la base Upstash ou données introuvables.');
+      }
+    } catch {
+      alert('⚠️ Erreur lors de la récupération depuis le Cloud.');
+    } finally {
+      setIsCloudLoading(false);
+    }
+  };
 
   // Active admin section
   const [activeAdminSection, setActiveAdminSection] = useState<AdminSection>('mariage');
@@ -62,14 +130,39 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     }
   };
 
-  // Helper to handle direct file photo upload from phone/computer
+  // Helper to handle and automatically compress photos from smartphone or computer
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       const reader = new FileReader();
-      reader.onload = () => {
-        if (typeof reader.result === 'string') {
-          setImageUrl(reader.result);
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onload = () => {
+          // Resize to max 1000px so it is lightweight, ultra-fast and fits easily in Upstash
+          const maxDim = 1000;
+          let width = img.width;
+          let height = img.height;
+          if (width > maxDim || height > maxDim) {
+            if (width > height) {
+              height = Math.round((height * maxDim) / width);
+              width = maxDim;
+            } else {
+              width = Math.round((width * maxDim) / height);
+              height = maxDim;
+            }
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, width, height);
+            const compressed = canvas.toDataURL('image/jpeg', 0.75);
+            setImageUrl(compressed);
+          }
+        };
+        if (typeof event.target?.result === 'string') {
+          img.src = event.target.result;
         }
       };
       reader.readAsDataURL(file);
@@ -104,7 +197,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
         },
       };
 
-      onSaveCatalog({
+      handleSave({
         ...catalog,
         weddingModels: [newModel, ...catalog.weddingModels],
       });
@@ -120,7 +213,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
         demoUrl: demoUrl.trim() || undefined,
       };
 
-      onSaveCatalog({
+      handleSave({
         ...catalog,
         saveTheDateItems: [newItem, ...catalog.saveTheDateItems],
       });
@@ -136,7 +229,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
         imageUrl: imageUrl,
       };
 
-      onSaveCatalog({
+      handleSave({
         ...catalog,
         guestGifts: [newGift, ...catalog.guestGifts],
       });
@@ -152,7 +245,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
         tags: ['React & TypeScript', 'SEO Google', 'WhatsApp Direct'],
       };
 
-      onSaveCatalog({
+      handleSave({
         ...catalog,
         webProjects: [newWeb, ...catalog.webProjects],
       });
@@ -168,7 +261,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
         demoUrl: demoUrl.trim() || undefined,
       };
 
-      onSaveCatalog({
+      handleSave({
         ...catalog,
         infographieItems: [newInfo, ...catalog.infographieItems],
       });
@@ -185,7 +278,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
   const handleDeleteWedding = (id: string) => {
     if (confirm('Supprimer ce modèle de mariage ?')) {
-      onSaveCatalog({
+      handleSave({
         ...catalog,
         weddingModels: catalog.weddingModels.filter((m) => m.id !== id),
       });
@@ -194,7 +287,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
   const handleDeleteStd = (id: string) => {
     if (confirm('Supprimer cet élément ?')) {
-      onSaveCatalog({
+      handleSave({
         ...catalog,
         saveTheDateItems: catalog.saveTheDateItems.filter((i) => i.id !== id),
       });
@@ -203,7 +296,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
   const handleDeleteGift = (id: string) => {
     if (confirm('Supprimer cet article cadeau ?')) {
-      onSaveCatalog({
+      handleSave({
         ...catalog,
         guestGifts: catalog.guestGifts.filter((g) => g.id !== id),
       });
@@ -212,7 +305,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
   const handleDeleteWeb = (id: string) => {
     if (confirm('Supprimer ce projet web ?')) {
-      onSaveCatalog({
+      handleSave({
         ...catalog,
         webProjects: catalog.webProjects.filter((w) => w.id !== id),
       });
@@ -221,7 +314,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
   const handleDeleteInfo = (id: string) => {
     if (confirm('Supprimer cette réalisation infographie ?')) {
-      onSaveCatalog({
+      handleSave({
         ...catalog,
         infographieItems: catalog.infographieItems.filter((i) => i.id !== id),
       });
@@ -281,13 +374,64 @@ export const AdminModal: React.FC<AdminModalProps> = ({
         ) : (
           /* FULL MULTI-SECTION ADMIN DASHBOARD */
           <div className="space-y-6">
-            <div className="border-b border-stone-800 pb-3 pr-8">
-              <span className="text-[10px] uppercase tracking-widest text-[#e5b869] font-bold block">
-                ADMINISTRATION GÉNÉRALE · PIXEL & TRAIT
-              </span>
-              <h3 className="font-serif text-2xl font-bold text-white mt-0.5">
-                Gérer les photos, vidéos et liens des 5 rubriques
-              </h3>
+            <div className="border-b border-stone-800 pb-3 pr-8 flex flex-col sm:flex-row sm:items-start justify-between gap-2">
+              <div>
+                <span className="text-[10px] uppercase tracking-widest text-[#e5b869] font-bold block">
+                  ADMINISTRATION GÉNÉRALE · PIXEL & TRAIT
+                </span>
+                <h3 className="font-serif text-2xl font-bold text-white mt-0.5">
+                  Gérer les photos, vidéos et liens des 5 rubriques
+                </h3>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  disabled={isPushingCloud}
+                  onClick={handlePushCurrentToCloud}
+                  className="flex items-center gap-1.5 px-3.5 py-1.5 bg-[#e5b869] hover:bg-[#d6a550] text-black rounded-full text-[11px] font-bold cursor-pointer transition-all shadow-md disabled:opacity-50"
+                  title="Envoyer les modifications de cet appareil vers la base de données Upstash Cloud"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isPushingCloud ? 'animate-spin' : ''}`} />
+                  <span>{isPushingCloud ? 'Envoi en cours...' : 'Envoyer ce téléphone vers le Cloud'}</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={isCloudLoading}
+                  onClick={handleReloadFromCloud}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-stone-900 hover:bg-stone-800 border border-stone-700 rounded-full text-[10px] text-stone-200 font-semibold cursor-pointer transition-colors disabled:opacity-50"
+                  title="Recharger les dernières données enregistrées depuis un autre appareil"
+                >
+                  <RefreshCw className={`w-3 h-3 text-[#e5b869] ${isCloudLoading ? 'animate-spin' : ''}`} />
+                  <span>{isCloudLoading ? 'Récupération...' : 'Recharger depuis le Cloud'}</span>
+                </button>
+                <a
+                  href="/pixel_et_trait_code_source.zip"
+                  download="pixel_et_trait_code_source.zip"
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-[#1f2937] hover:bg-[#374151] border border-stone-600 rounded-full text-[10px] text-white font-semibold cursor-pointer transition-colors"
+                  title="Télécharger l'archive ZIP complète du code source corrigé"
+                >
+                  <Download className="w-3 h-3 text-emerald-400" />
+                  <span>Télécharger le ZIP</span>
+                </a>
+              </div>
+            </div>
+
+            {/* Cloud Status Helper Notice */}
+            <div className="bg-stone-950/80 border border-stone-800 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                <span className="text-stone-300 text-[11px]">
+                  <strong>Base Upstash Cloud active :</strong> Cliquez sur <em>« Envoyer ce téléphone vers le Cloud »</em> pour que votre machine voie vos modifications.
+                </span>
+              </div>
+              <a
+                href="/pixel_et_trait_code_source.zip"
+                download="pixel_et_trait_code_source.zip"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-stone-900 border border-stone-700 hover:border-[#e5b869] rounded-lg text-[10px] text-stone-200 shrink-0"
+              >
+                <Download className="w-3 h-3 text-[#e5b869]" />
+                <span>Télécharger code source (.ZIP)</span>
+              </a>
             </div>
 
             {/* SECTION SELECTOR TABS */}
@@ -542,7 +686,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   Éléments actuellement en ligne dans cette rubrique :
                 </span>
                 <button
-                  onClick={onResetCatalog}
+                  onClick={handleReset}
                   className="text-[11px] text-stone-400 hover:text-white flex items-center gap-1 cursor-pointer"
                   title="Restaurer le catalogue d'origine"
                 >

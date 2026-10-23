@@ -16,9 +16,9 @@ export const STUDIO_INFO = {
   whatsappUrl: (message: string) => `https://wa.me/237651887722?text=${encodeURIComponent(message)}`,
 };
 
-// Configuration directe de votre base Upstash Redis
-const UPSTASH_URL = 'https://assured-oriole-206253.upstash.io';
-const UPSTASH_TOKEN = 'gQAAAAAAAyWtAAIgcDEwZmRkZGY2YjE2MjY0ZGU4OTAxNmI5ZTRmMzA2MzA2YQ';
+// Upstash Cloud Database Configuration (direct REST API)
+const UPSTASH_URL = (import.meta.env.VITE_KV_REST_API_URL || 'https://assured-oriole-206253.upstash.io').replace(/\/$/, '');
+const UPSTASH_TOKEN = import.meta.env.VITE_KV_REST_API_TOKEN || 'gQAAAAAAAyWtAAIgcDEwZmRkZGY2YjE2MjY0ZGU4OTAxNmI5ZTRmMzA2MzA2YQ';
 const UPSTASH_KEY = 'pixel_et_trait_catalog_cloud';
 
 export const WEDDING_PILLARS = [
@@ -262,18 +262,18 @@ export const DEFAULT_CATALOG: StudioCatalogState = {
   infographieItems: INITIAL_INFOGRAPHIE_ITEMS,
 };
 
-// 1. Sauvegarde locale de secours
+// 1. Local fallback storage
 export function getStudioCatalogLocal(): StudioCatalogState {
   try {
     const raw = localStorage.getItem(STORAGE_CATALOG_KEY);
     if (!raw) return DEFAULT_CATALOG;
     const parsed = JSON.parse(raw);
     return {
-      weddingModels: parsed.weddingModels || INITIAL_WEDDING_MODELS,
-      saveTheDateItems: parsed.saveTheDateItems || INITIAL_SAVE_THE_DATE,
-      guestGifts: parsed.guestGifts || INITIAL_GUEST_GIFTS,
-      webProjects: parsed.webProjects || INITIAL_WEB_PROJECTS,
-      infographieItems: parsed.infographieItems || INITIAL_INFOGRAPHIE_ITEMS,
+      weddingModels: Array.isArray(parsed.weddingModels) ? parsed.weddingModels : INITIAL_WEDDING_MODELS,
+      saveTheDateItems: Array.isArray(parsed.saveTheDateItems) ? parsed.saveTheDateItems : INITIAL_SAVE_THE_DATE,
+      guestGifts: Array.isArray(parsed.guestGifts) ? parsed.guestGifts : INITIAL_GUEST_GIFTS,
+      webProjects: Array.isArray(parsed.webProjects) ? parsed.webProjects : INITIAL_WEB_PROJECTS,
+      infographieItems: Array.isArray(parsed.infographieItems) ? parsed.infographieItems : INITIAL_INFOGRAPHIE_ITEMS,
     };
   } catch {
     return DEFAULT_CATALOG;
@@ -288,29 +288,34 @@ export function saveStudioCatalogLocal(state: StudioCatalogState) {
   }
 }
 
-// 2. Synchronisation Cloud avec votre base Upstash Redis
+// 2. Upstash Cloud Database Synchronisation (Active sur téléphone ET ordinateur)
 export async function fetchCatalogFromUpstash(): Promise<StudioCatalogState | null> {
   try {
-    const res = await fetch(`${UPSTASH_URL}/get/${UPSTASH_KEY}`, {
+    const res = await fetch(`${UPSTASH_URL}/get/${UPSTASH_KEY}?t=${Date.now()}`, {
       headers: {
         Authorization: `Bearer ${UPSTASH_TOKEN}`,
       },
+      cache: 'no-store',
     });
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.warn('Upstash HTTP error', res.status);
+      return null;
+    }
+
     const data = await res.json();
     if (!data.result) return null;
 
     const parsed = typeof data.result === 'string' ? JSON.parse(data.result) : data.result;
     return {
-      weddingModels: parsed.weddingModels || INITIAL_WEDDING_MODELS,
-      saveTheDateItems: parsed.saveTheDateItems || INITIAL_SAVE_THE_DATE,
-      guestGifts: parsed.guestGifts || INITIAL_GUEST_GIFTS,
-      webProjects: parsed.webProjects || INITIAL_WEB_PROJECTS,
-      infographieItems: parsed.infographieItems || INITIAL_INFOGRAPHIE_ITEMS,
+      weddingModels: Array.isArray(parsed.weddingModels) ? parsed.weddingModels : INITIAL_WEDDING_MODELS,
+      saveTheDateItems: Array.isArray(parsed.saveTheDateItems) ? parsed.saveTheDateItems : INITIAL_SAVE_THE_DATE,
+      guestGifts: Array.isArray(parsed.guestGifts) ? parsed.guestGifts : INITIAL_GUEST_GIFTS,
+      webProjects: Array.isArray(parsed.webProjects) ? parsed.webProjects : INITIAL_WEB_PROJECTS,
+      infographieItems: Array.isArray(parsed.infographieItems) ? parsed.infographieItems : INITIAL_INFOGRAPHIE_ITEMS,
     };
   } catch (err) {
-    console.warn('Upstash fetch failed, using local storage', err);
+    console.warn('Upstash fetch failed, using local storage fallback', err);
     return null;
   }
 }
@@ -326,9 +331,14 @@ export async function saveCatalogToUpstash(state: StudioCatalogState): Promise<b
       body: JSON.stringify(state),
     });
 
-    return res.ok;
+    if (!res.ok) {
+      console.error('Upstash save HTTP error', res.status);
+      return false;
+    }
+
+    return true;
   } catch (err) {
-    console.error('Failed to save to Upstash', err);
+    console.error('Failed to save to Upstash cloud', err);
     return false;
   }
 }

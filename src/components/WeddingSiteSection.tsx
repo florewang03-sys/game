@@ -4,10 +4,12 @@ import { STUDIO_INFO, WEDDING_PILLARS } from '../data/initialData';
 import { CeremonyModel } from '../types';
 
 interface WeddingSiteSectionProps {
-  models: CeremonyModel[];
+  models?: CeremonyModel[];
 }
 
-export const WeddingSiteSection: React.FC<WeddingSiteSectionProps> = ({ models }) => {
+export const WeddingSiteSection: React.FC<WeddingSiteSectionProps> = ({ models = [] }) => {
+  const displayModels = models && models.length > 0 ? models : [];
+
   return (
     <section className="py-12 sm:py-16 bg-[#0c0c0c] text-white text-left">
       <div className="max-w-3xl mx-auto px-4 sm:px-6 space-y-12">
@@ -107,7 +109,7 @@ export const WeddingSiteSection: React.FC<WeddingSiteSectionProps> = ({ models }
           </div>
 
           <div className="space-y-6">
-            {models.map((model) => (
+            {displayModels.map((model) => (
               <div
                 key={model.id}
                 className="rounded-2xl overflow-hidden border border-[#262626] bg-[#141414] hover:border-[#e5b869]/60 transition-all flex flex-col justify-between"

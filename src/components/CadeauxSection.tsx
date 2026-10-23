@@ -4,10 +4,12 @@ import { STUDIO_INFO } from '../data/initialData';
 import { GuestGiftItem } from '../types';
 
 interface CadeauxSectionProps {
-  gifts: GuestGiftItem[];
+  gifts?: GuestGiftItem[];
 }
 
-export const CadeauxSection: React.FC<CadeauxSectionProps> = ({ gifts }) => {
+export const CadeauxSection: React.FC<CadeauxSectionProps> = ({ gifts = [] }) => {
+  const displayGifts = gifts && gifts.length > 0 ? gifts : [];
+
   return (
     <section className="py-12 sm:py-16 bg-[#0c0c0c] text-white text-left">
       <div className="max-w-3xl mx-auto px-4 sm:px-6 space-y-10">
@@ -59,7 +61,7 @@ export const CadeauxSection: React.FC<CadeauxSectionProps> = ({ gifts }) => {
           </span>
 
           <div className="space-y-4">
-            {gifts.map((gift) => (
+            {displayGifts.map((gift) => (
               <div
                 key={gift.id}
                 className="p-5 rounded-xl bg-[#141414] border border-[#262626] hover:border-[#e5b869]/40 transition-colors space-y-3"

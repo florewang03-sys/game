@@ -4,10 +4,12 @@ import { STUDIO_INFO } from '../data/initialData';
 import { SaveTheDateItem } from '../types';
 
 interface SaveTheDateSectionProps {
-  items: SaveTheDateItem[];
+  items?: SaveTheDateItem[];
 }
 
-export const SaveTheDateSection: React.FC<SaveTheDateSectionProps> = ({ items }) => {
+export const SaveTheDateSection: React.FC<SaveTheDateSectionProps> = ({ items = [] }) => {
+  const displayItems = items && items.length > 0 ? items : [];
+
   return (
     <section className="py-12 sm:py-16 bg-[#0c0c0c] text-white text-left">
       <div className="max-w-3xl mx-auto px-4 sm:px-6 space-y-10">
@@ -30,7 +32,7 @@ export const SaveTheDateSection: React.FC<SaveTheDateSectionProps> = ({ items })
 
         {/* Dynamic Cards */}
         <div className="space-y-4">
-          {items.map((prod) => (
+          {displayItems.map((prod) => (
             <div
               key={prod.id}
               className="p-6 rounded-2xl bg-[#141414] border border-[#262626] space-y-3 hover:border-[#e5b869]/40 transition-colors"
